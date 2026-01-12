@@ -1,0 +1,13 @@
+{
+    "text": [2, 0, 0, 0],
+    "data": [170, 187, 204, 221],
+    "symbols": [
+        {
+            "name": "funcB",
+            "type": 1,
+            "section": 0,
+            "offset": 0
+        }
+    ],
+    "relocs": []
+}

@@ -1,0 +1,25 @@
+{
+    "text": [1, 0, 0, 0, 0, 0, 0, 0],
+    "data": [],
+    "symbols": [
+        {
+            "name": "funcA",
+            "type": 1,
+            "section": 0,
+            "offset": 0
+        },
+        {
+            "name": "funcB",
+            "type": 0,
+            "section": 0,
+            "offset": 0
+        }
+    ],
+    "relocs": [
+        {
+            "offset": 4,
+            "symbol_name": "funcB",
+            "type": 1
+        }
+    ]
+}
