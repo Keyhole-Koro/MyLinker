@@ -262,15 +262,21 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
 
             // Apply patch
             // We need to read existing to preserve bits if it's not a full overwrite
-            uint32_t* code_ptr = reinterpret_cast<uint32_t*>(&obj.text_section[patch_offset]);
-            uint32_t existing = *code_ptr;
+            // Handle Big Endian read/write manually to avoid host endianness issues
+            uint8_t* ptr = &obj.text_section[patch_offset];
+            uint32_t existing = (static_cast<uint32_t>(ptr[0]) << 24) |
+                                (static_cast<uint32_t>(ptr[1]) << 16) |
+                                (static_cast<uint32_t>(ptr[2]) << 8)  |
+                                static_cast<uint32_t>(ptr[3]);
+
+            uint32_t final_val = 0;
 
             if (reloc.type == RELOC_RELATIVE) {
                 // Preserving top 6 bits (Opcode) - Assumption based on typical custom CPU
                 // And assuming the offset field is the lower 26 bits.
                 // Check if offset fits in 26 bits?
                 // (offset & ~0x03FFFFFF) should be 0 or all 1s.
-                *code_ptr = (existing & 0xFC000000) | (value_to_write & 0x03FFFFFF);
+                final_val = (existing & 0xFC000000) | (value_to_write & 0x03FFFFFF);
             } else {
                 // RELOC_ABSOLUTE
                 // Usually for data pointers (LDR R1, =Label).
@@ -279,8 +285,14 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
                 // If it's a 32-bit absolute pointer in a data section or a literal pool, it's a full overwrite.
                 // If it's an instruction trying to load a 32-bit immediate, it might be complex.
                 // Let's assume full overwrite for Absolute for now (simplest for "Minimal").
-                *code_ptr = value_to_write;
+                final_val = value_to_write;
             }
+
+            // Write back in Big Endian
+            ptr[0] = static_cast<uint8_t>((final_val >> 24) & 0xFF);
+            ptr[1] = static_cast<uint8_t>((final_val >> 16) & 0xFF);
+            ptr[2] = static_cast<uint8_t>((final_val >> 8) & 0xFF);
+            ptr[3] = static_cast<uint8_t>(final_val & 0xFF);
         }
     }
 
