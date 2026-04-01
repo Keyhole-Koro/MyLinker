@@ -8,5 +8,8 @@ all: $(TARGET)
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
 
+test-integration: $(TARGET)
+	python3 test/run_integration_tests.py
+
 clean:
 	rm -f $(TARGET)
