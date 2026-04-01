@@ -3,6 +3,12 @@
     "data": [],
     "symbols": [
         {
+            "name": "__START__",
+            "type": 1,
+            "section": 0,
+            "offset": 0
+        },
+        {
             "name": "funcA",
             "type": 1,
             "section": 0,
