@@ -279,13 +279,16 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
                 final_val = (existing & 0xFC000000) | (value_to_write & 0x03FFFFFF);
             } else {
                 // RELOC_ABSOLUTE
-                // Usually for data pointers (LDR R1, =Label).
-                // This often replaces the whole immediate/address word?
-                // Or is it a `MOV R1, Imm`?
-                // If it's a 32-bit absolute pointer in a data section or a literal pool, it's a full overwrite.
-                // If it's an instruction trying to load a 32-bit immediate, it might be complex.
-                // Let's assume full overwrite for Absolute for now (simplest for "Minimal").
-                final_val = value_to_write;
+                // Preserve opcode+register bits for reg,imm21 style instructions like
+                // MOVI rX, label and patch only the low 21-bit immediate field.
+                if (value_to_write >= (1u << 21)) {
+                    std::cerr << "Error: Absolute relocation target 0x" << std::hex
+                              << value_to_write << std::dec
+                              << " exceeds 21-bit immediate range in " << obj.filename
+                              << std::endl;
+                    return false;
+                }
+                final_val = (existing & 0xFFE00000u) | (value_to_write & 0x001FFFFFu);
             }
 
             // Write back in Big Endian
