@@ -151,6 +151,13 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
         }
     }
     
+    // Synthesize the `_end` symbol marking the end of the loaded image
+    // (text + data). The kernel heap allocator uses this as the start of its
+    // free region. current_data_addr has advanced past the last data section.
+    if (!global_symbol_table.count("_end")) {
+        global_symbol_table["_end"] = current_data_addr;
+    }
+
     // verify all needed symbols are found
     for (const auto& name : needed_symbols) {
         if (global_symbol_table.find(name) == global_symbol_table.end()) {
