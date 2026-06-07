@@ -10,6 +10,9 @@ LINKER_EXE = REPO_ROOT / "mllinker"
 OBJ_GEN = REPO_ROOT / "tools" / "obj_gen.py"
 TESTS = [
     ("test_basic", ["test_A.json", "test_B.json"]),
+    # Verifies the linker synthesizes the `_end` symbol; without it this object's
+    # undefined `_end` reference would fail to resolve.
+    ("test_end_symbol", ["test_end_symbol.json"]),
 ]
 
 
