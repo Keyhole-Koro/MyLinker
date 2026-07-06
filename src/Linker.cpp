@@ -1,10 +1,13 @@
 #include "Linker.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -342,9 +345,53 @@ bool write_output(const std::string& output_path,
     return true;
 }
 
+// Emit a symbol map so downstream tools (e.g. the emulator profiler) can turn a
+// program counter into a function name. One line per symbol, sorted by address:
+//   0x00000040 kernel_main
+// A leading comment records the text/data split so a reader knows where code
+// ends. Only symbols that survived linking (referenced ones plus `_end`) appear.
+bool write_map(const std::string& map_path,
+               const std::map<std::string, uint32_t>& global_symbol_table,
+               uint32_t total_text_size,
+               uint32_t total_data_size) {
+    std::ofstream mapfile(map_path);
+    if (!mapfile) {
+        std::cerr << "Error: Could not open map file " << map_path << std::endl;
+        return false;
+    }
+
+    mapfile << "# MyLinker symbol map\n";
+    mapfile << "# text: 0x0 .. 0x" << std::hex << total_text_size << std::dec
+            << " (" << total_text_size << " bytes)\n";
+    mapfile << "# data: 0x" << std::hex << total_text_size << " .. 0x"
+            << (total_text_size + total_data_size) << std::dec
+            << " (" << total_data_size << " bytes)\n";
+
+    // Sort by address so the map reads like a memory layout and so the profiler
+    // can binary-search / range-scan it to attribute a PC to the nearest symbol.
+    std::vector<std::pair<uint32_t, std::string>> ordered;
+    ordered.reserve(global_symbol_table.size());
+    for (const auto& entry : global_symbol_table) {
+        ordered.emplace_back(entry.second, entry.first);
+    }
+    std::sort(ordered.begin(), ordered.end());
+
+    for (const auto& entry : ordered) {
+        char addr_buf[16];
+        std::snprintf(addr_buf, sizeof(addr_buf), "0x%08X", entry.first);
+        mapfile << addr_buf << ' ' << entry.second << '\n';
+    }
+
+    std::cout << "Wrote symbol map " << map_path << " (" << ordered.size()
+              << " symbols)" << std::endl;
+    return true;
+}
+
 }  // namespace
 
-bool link_objects(const std::vector<std::string>& input_files, const std::string& output_path) {
+bool link_objects(const std::vector<std::string>& input_files,
+                  const std::string& output_path,
+                  const std::string& map_path) {
     std::vector<LoadedObject> objects;
     objects.reserve(input_files.size());
 
@@ -371,5 +418,16 @@ bool link_objects(const std::vector<std::string>& input_files, const std::string
     }
 
     // Pass 3: Write Output
-    return write_output(output_path, objects, total_text_size, total_data_size);
+    if (!write_output(output_path, objects, total_text_size, total_data_size)) {
+        return false;
+    }
+
+    // Optional Pass 4: emit the symbol map for the profiler / debuggers.
+    if (!map_path.empty()) {
+        if (!write_map(map_path, global_symbol_table, total_text_size, total_data_size)) {
+            return false;
+        }
+    }
+
+    return true;
 }
