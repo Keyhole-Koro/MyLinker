@@ -60,7 +60,8 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
 bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
                                std::map<std::string, uint32_t>& global_symbol_table,
                                uint32_t& total_text_size,
-                               uint32_t& total_data_size) {
+                               uint32_t& total_data_size,
+                               uint32_t base_addr) {
     std::set<std::string> needed_symbols;
     needed_symbols.insert("__START__");
 
@@ -115,7 +116,7 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
     objects = std::move(active_objects);
 
     // Layout and Symbol Definition
-    uint32_t current_text_addr = 0;
+    uint32_t current_text_addr = base_addr;
     total_text_size = 0;
     total_data_size = 0;
 
@@ -124,7 +125,7 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
         total_data_size += obj.header.data_size;
     }
 
-    uint32_t current_data_addr = total_text_size;
+    uint32_t current_data_addr = base_addr + total_text_size;
 
     for (auto& obj : objects) {
         obj.text_base_addr = current_text_addr;
@@ -391,7 +392,8 @@ bool write_map(const std::string& map_path,
 
 bool link_objects(const std::vector<std::string>& input_files,
                   const std::string& output_path,
-                  const std::string& map_path) {
+                  const std::string& map_path,
+                  uint32_t base_addr) {
     std::vector<LoadedObject> objects;
     objects.reserve(input_files.size());
 
@@ -408,7 +410,7 @@ bool link_objects(const std::vector<std::string>& input_files,
     std::map<std::string, uint32_t> global_symbol_table;
     uint32_t total_text_size = 0;
     uint32_t total_data_size = 0;
-    if (!layout_and_define_symbols(objects, global_symbol_table, total_text_size, total_data_size)) {
+    if (!layout_and_define_symbols(objects, global_symbol_table, total_text_size, total_data_size, base_addr)) {
         return false;
     }
 

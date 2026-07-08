@@ -26,6 +26,7 @@ struct LoadedObject {
 // by address) that tools like the profiler use to translate PCs into names.
 bool link_objects(const std::vector<std::string>& input_files,
                   const std::string& output_path,
-                  const std::string& map_path = "");
+                  const std::string& map_path,
+                  uint32_t base_addr);
 
 #endif  // MYCCLINKER_LINKER_H
