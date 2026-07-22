@@ -3,20 +3,21 @@ CFLAGS = -Wall -Wextra -std=c++17 -Iinc
 SRC = src/main.cpp src/Linker.cpp
 TARGET = mllinker
 
-.PHONY: all test test-integration test-all clean
+.PHONY: all test test-component test-integration test-all clean
 
 all: $(TARGET)
 
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
 
-test-integration: $(TARGET)
+# The current linker suite is self-contained: it generates objects and verifies linking.
+test-component: $(TARGET)
 	python3 test/run_integration_tests.py
 
-# The current linker suite is self-contained: it generates objects and verifies linking.
-test: test-integration
-
-test-all: test
+# Backward-compatible aliases for the historical target names.
+test-integration: test-component
+test: test-component
+test-all: test-component
 
 clean:
 	rm -f $(TARGET)
