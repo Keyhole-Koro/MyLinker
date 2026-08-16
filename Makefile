@@ -8,8 +8,14 @@ all: $(TARGET)
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
 
-test-integration: $(TARGET)
+test-e2e: $(TARGET)
 	python3 test/run_integration_tests.py
+
+test-integration: test-e2e
+
+test-component:
+
+test-all: test-component test-e2e
 
 clean:
 	rm -f $(TARGET)
