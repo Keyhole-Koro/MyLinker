@@ -12,6 +12,23 @@
 
 namespace {
 
+// Generic instantiations are emitted into every object that uses them, the way
+// C++ templates are. MyLangCompiler mangles the template and its type
+// arguments into the name (`__mlg_f_7_rb_push_p0_r0_m0_n3_i32`), so two
+// definitions sharing a name are the same function and the first one can stand
+// for all of them. The prefix is compiler-owned: MyLangCompiler rejects any
+// user declaration that starts with it.
+//
+// This is the symbol half of what C++ gets from a COMDAT group. The duplicate's
+// bytes stay in the image, because the object format carries one text section
+// per object and offers no way to drop a single function's range -- only the
+// reference is deduplicated. Dropping the code too would need per-function
+// sections and a group signature in the object format.
+static bool is_mergeable_instantiation(const char* name) {
+    static const char kPrefix[] = "__mlg_";
+    return std::strncmp(name, kPrefix, sizeof(kPrefix) - 1) == 0;
+}
+
 bool load_object_file(const std::string& path, LoadedObject& obj) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -127,6 +144,7 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
 
     uint32_t current_data_addr = base_addr + total_text_size;
 
+
     for (auto& obj : objects) {
         obj.text_base_addr = current_text_addr;
         obj.data_base_addr = current_data_addr;
@@ -146,6 +164,10 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
                     }
 
                     if (global_symbol_table.count(sym.name)) {
+                        if (is_mergeable_instantiation(sym.name)) {
+                            // Already have an identical copy; keep the first.
+                            continue;
+                        }
                         std::cerr << "Error: Duplicate symbol definition '" << sym.name << "'" << std::endl;
                         return false;
                     }
