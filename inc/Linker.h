@@ -21,6 +21,12 @@ struct LoadedObject {
     uint32_t data_base_addr;
 };
 
-bool link_objects(const std::vector<std::string>& input_files, const std::string& output_path);
+// Link the given object files into output_path. When map_path is non-empty,
+// also write a symbol map (one "0xADDR NAME" line per resolved symbol, sorted
+// by address) that tools like the profiler use to translate PCs into names.
+bool link_objects(const std::vector<std::string>& input_files,
+                  const std::string& output_path,
+                  const std::string& map_path,
+                  uint32_t base_addr);
 
 #endif  // MYCCLINKER_LINKER_H

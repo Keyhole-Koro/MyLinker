@@ -1,13 +1,33 @@
 #include "Linker.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <set>
+#include <utility>
 #include <vector>
 
 namespace {
+
+// Generic instantiations are emitted into every object that uses them, the way
+// C++ templates are. MyLangCompiler mangles the template and its type
+// arguments into the name (`__mlg_f_7_rb_push_p0_r0_m0_n3_i32`), so two
+// definitions sharing a name are the same function and the first one can stand
+// for all of them. The prefix is compiler-owned: MyLangCompiler rejects any
+// user declaration that starts with it.
+//
+// This is the symbol half of what C++ gets from a COMDAT group. The duplicate's
+// bytes stay in the image, because the object format carries one text section
+// per object and offers no way to drop a single function's range -- only the
+// reference is deduplicated. Dropping the code too would need per-function
+// sections and a group signature in the object format.
+static bool is_mergeable_instantiation(const char* name) {
+    static const char kPrefix[] = "__mlg_";
+    return std::strncmp(name, kPrefix, sizeof(kPrefix) - 1) == 0;
+}
 
 bool load_object_file(const std::string& path, LoadedObject& obj) {
     std::ifstream file(path, std::ios::binary);
@@ -57,7 +77,8 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
 bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
                                std::map<std::string, uint32_t>& global_symbol_table,
                                uint32_t& total_text_size,
-                               uint32_t& total_data_size) {
+                               uint32_t& total_data_size,
+                               uint32_t base_addr) {
     std::set<std::string> needed_symbols;
     needed_symbols.insert("__START__");
 
@@ -112,7 +133,7 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
     objects = std::move(active_objects);
 
     // Layout and Symbol Definition
-    uint32_t current_text_addr = 0;
+    uint32_t current_text_addr = base_addr;
     total_text_size = 0;
     total_data_size = 0;
 
@@ -121,7 +142,8 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
         total_data_size += obj.header.data_size;
     }
 
-    uint32_t current_data_addr = total_text_size;
+    uint32_t current_data_addr = base_addr + total_text_size;
+
 
     for (auto& obj : objects) {
         obj.text_base_addr = current_text_addr;
@@ -142,6 +164,10 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
                     }
 
                     if (global_symbol_table.count(sym.name)) {
+                        if (is_mergeable_instantiation(sym.name)) {
+                            // Already have an identical copy; keep the first.
+                            continue;
+                        }
                         std::cerr << "Error: Duplicate symbol definition '" << sym.name << "'" << std::endl;
                         return false;
                     }
@@ -342,9 +368,54 @@ bool write_output(const std::string& output_path,
     return true;
 }
 
+// Emit a symbol map so downstream tools (e.g. the emulator profiler) can turn a
+// program counter into a function name. One line per symbol, sorted by address:
+//   0x00000040 kernel_main
+// A leading comment records the text/data split so a reader knows where code
+// ends. Only symbols that survived linking (referenced ones plus `_end`) appear.
+bool write_map(const std::string& map_path,
+               const std::map<std::string, uint32_t>& global_symbol_table,
+               uint32_t total_text_size,
+               uint32_t total_data_size) {
+    std::ofstream mapfile(map_path);
+    if (!mapfile) {
+        std::cerr << "Error: Could not open map file " << map_path << std::endl;
+        return false;
+    }
+
+    mapfile << "# MyLinker symbol map\n";
+    mapfile << "# text: 0x0 .. 0x" << std::hex << total_text_size << std::dec
+            << " (" << total_text_size << " bytes)\n";
+    mapfile << "# data: 0x" << std::hex << total_text_size << " .. 0x"
+            << (total_text_size + total_data_size) << std::dec
+            << " (" << total_data_size << " bytes)\n";
+
+    // Sort by address so the map reads like a memory layout and so the profiler
+    // can binary-search / range-scan it to attribute a PC to the nearest symbol.
+    std::vector<std::pair<uint32_t, std::string>> ordered;
+    ordered.reserve(global_symbol_table.size());
+    for (const auto& entry : global_symbol_table) {
+        ordered.emplace_back(entry.second, entry.first);
+    }
+    std::sort(ordered.begin(), ordered.end());
+
+    for (const auto& entry : ordered) {
+        char addr_buf[16];
+        std::snprintf(addr_buf, sizeof(addr_buf), "0x%08X", entry.first);
+        mapfile << addr_buf << ' ' << entry.second << '\n';
+    }
+
+    std::cout << "Wrote symbol map " << map_path << " (" << ordered.size()
+              << " symbols)" << std::endl;
+    return true;
+}
+
 }  // namespace
 
-bool link_objects(const std::vector<std::string>& input_files, const std::string& output_path) {
+bool link_objects(const std::vector<std::string>& input_files,
+                  const std::string& output_path,
+                  const std::string& map_path,
+                  uint32_t base_addr) {
     std::vector<LoadedObject> objects;
     objects.reserve(input_files.size());
 
@@ -361,7 +432,7 @@ bool link_objects(const std::vector<std::string>& input_files, const std::string
     std::map<std::string, uint32_t> global_symbol_table;
     uint32_t total_text_size = 0;
     uint32_t total_data_size = 0;
-    if (!layout_and_define_symbols(objects, global_symbol_table, total_text_size, total_data_size)) {
+    if (!layout_and_define_symbols(objects, global_symbol_table, total_text_size, total_data_size, base_addr)) {
         return false;
     }
 
@@ -371,5 +442,16 @@ bool link_objects(const std::vector<std::string>& input_files, const std::string
     }
 
     // Pass 3: Write Output
-    return write_output(output_path, objects, total_text_size, total_data_size);
+    if (!write_output(output_path, objects, total_text_size, total_data_size)) {
+        return false;
+    }
+
+    // Optional Pass 4: emit the symbol map for the profiler / debuggers.
+    if (!map_path.empty()) {
+        if (!write_map(map_path, global_symbol_table, total_text_size, total_data_size)) {
+            return false;
+        }
+    }
+
+    return true;
 }

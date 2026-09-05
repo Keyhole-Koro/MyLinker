@@ -14,8 +14,11 @@ $(TARGET): $(SRC)
 test-component: $(TARGET)
 	python3 test/run_integration_tests.py
 
-# Backward-compatible aliases for the historical target names.
+# Backward-compatible aliases for the historical target names. test-component is
+# the one qa/tests/test-all.py invokes; on the profiler-map branch it was an
+# empty rule, so `make qa ARGS=linker` ran nothing and reported success.
 test-integration: test-component
+test-e2e: test-component
 test: test-component
 test-all: test-component
 
