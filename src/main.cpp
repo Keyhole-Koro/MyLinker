@@ -10,6 +10,7 @@ int main(int argc, char* argv[]) {
     //   mllinker <output.bin> <input1.obj> [input2.obj ...]
     std::string map_path;
     uint32_t base_addr = 0;
+    bool emit_header = false;
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -25,13 +26,15 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             base_addr = std::stoul(argv[++i], nullptr, 16);
+        } else if (arg == "--header") {
+            emit_header = true;
         } else {
             args.push_back(std::move(arg));
         }
     }
 
     if (args.size() < 2) {
-        std::cout << "Usage: mllinker [--map <file>] [--base <hex_addr>] <output.bin> <input1.obj> [input2.obj ...]"
+        std::cout << "Usage: mllinker [--map <file>] [--base <hex_addr>] [--header] <output.bin> <input1.obj> [input2.obj ...]"
                   << std::endl;
         return 1;
     }
@@ -39,7 +42,7 @@ int main(int argc, char* argv[]) {
     std::string output_path = args[0];
     std::vector<std::string> input_files(args.begin() + 1, args.end());
 
-    if (!link_objects(input_files, output_path, map_path, base_addr)) {
+    if (!link_objects(input_files, output_path, map_path, base_addr, emit_header)) {
         return 1;
     }
 

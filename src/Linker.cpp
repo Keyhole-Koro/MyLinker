@@ -78,7 +78,8 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
                                std::map<std::string, uint32_t>& global_symbol_table,
                                uint32_t& total_text_size,
                                uint32_t& total_data_size,
-                               uint32_t base_addr) {
+                               uint32_t base_addr,
+                               bool emit_header) {
     std::set<std::string> needed_symbols;
     needed_symbols.insert("__START__");
 
@@ -142,8 +143,10 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
         total_data_size += obj.header.data_size;
     }
 
-    uint32_t current_data_addr = base_addr + total_text_size;
-
+    // If emit_header is requested, page-align the data section to 4 KiB so that
+    // text and data reside on separate pages with distinct MMU protections (RX vs RW).
+    uint32_t current_data_addr = emit_header ? ((base_addr + total_text_size + 4095u) & ~4095u)
+                                             : (base_addr + total_text_size);
 
     for (auto& obj : objects) {
         obj.text_base_addr = current_text_addr;
@@ -335,14 +338,36 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
     return true;
 }
 
+static void write_be32(std::ostream& os, uint32_t val) {
+    uint8_t b[4];
+    b[0] = static_cast<uint8_t>((val >> 24) & 0xFF);
+    b[1] = static_cast<uint8_t>((val >> 16) & 0xFF);
+    b[2] = static_cast<uint8_t>((val >> 8) & 0xFF);
+    b[3] = static_cast<uint8_t>(val & 0xFF);
+    os.write(reinterpret_cast<const char*>(b), 4);
+}
+
 bool write_output(const std::string& output_path,
                   const std::vector<LoadedObject>& objects,
                   uint32_t total_text_size,
-                  uint32_t total_data_size) {
+                  uint32_t total_data_size,
+                  bool emit_header,
+                  uint32_t entry_point) {
     std::ofstream outfile(output_path, std::ios::binary);
     if (!outfile) {
         std::cerr << "Error: Could not open output file " << output_path << std::endl;
         return false;
+    }
+
+    if (emit_header) {
+        write_be32(outfile, MBIN_MAGIC);
+        write_be32(outfile, MBIN_VERSION_1);
+        write_be32(outfile, entry_point);
+        write_be32(outfile, sizeof(MbinHeader)); // text_offset = 32
+        write_be32(outfile, total_text_size);
+        write_be32(outfile, sizeof(MbinHeader) + total_text_size); // data_offset
+        write_be32(outfile, total_data_size);
+        write_be32(outfile, 0); // bss_size
     }
 
     // Write all Text sections
@@ -362,6 +387,9 @@ bool write_output(const std::string& output_path,
     }
 
     std::cout << "Successfully created " << output_path << std::endl;
+    if (emit_header) {
+        std::cout << "Header: MBIN v2 (32 bytes), Entry: 0x" << std::hex << entry_point << std::dec << std::endl;
+    }
     std::cout << "Text Size: " << total_text_size << " bytes" << std::endl;
     std::cout << "Data Size: " << total_data_size << " bytes" << std::endl;
 
@@ -375,19 +403,24 @@ bool write_output(const std::string& output_path,
 // ends. Only symbols that survived linking (referenced ones plus `_end`) appear.
 bool write_map(const std::string& map_path,
                const std::map<std::string, uint32_t>& global_symbol_table,
+               uint32_t base_addr,
                uint32_t total_text_size,
-               uint32_t total_data_size) {
+               uint32_t total_data_size,
+               bool emit_header) {
     std::ofstream mapfile(map_path);
     if (!mapfile) {
         std::cerr << "Error: Could not open map file " << map_path << std::endl;
         return false;
     }
 
+    uint32_t data_base = emit_header ? ((base_addr + total_text_size + 4095u) & ~4095u)
+                                     : (base_addr + total_text_size);
+
     mapfile << "# MyLinker symbol map\n";
-    mapfile << "# text: 0x0 .. 0x" << std::hex << total_text_size << std::dec
+    mapfile << "# text: 0x" << std::hex << base_addr << " .. 0x" << (base_addr + total_text_size) << std::dec
             << " (" << total_text_size << " bytes)\n";
-    mapfile << "# data: 0x" << std::hex << total_text_size << " .. 0x"
-            << (total_text_size + total_data_size) << std::dec
+    mapfile << "# data: 0x" << std::hex << data_base << " .. 0x"
+            << (data_base + total_data_size) << std::dec
             << " (" << total_data_size << " bytes)\n";
 
     // Sort by address so the map reads like a memory layout and so the profiler
@@ -415,7 +448,8 @@ bool write_map(const std::string& map_path,
 bool link_objects(const std::vector<std::string>& input_files,
                   const std::string& output_path,
                   const std::string& map_path,
-                  uint32_t base_addr) {
+                  uint32_t base_addr,
+                  bool emit_header) {
     std::vector<LoadedObject> objects;
     objects.reserve(input_files.size());
 
@@ -432,7 +466,7 @@ bool link_objects(const std::vector<std::string>& input_files,
     std::map<std::string, uint32_t> global_symbol_table;
     uint32_t total_text_size = 0;
     uint32_t total_data_size = 0;
-    if (!layout_and_define_symbols(objects, global_symbol_table, total_text_size, total_data_size, base_addr)) {
+    if (!layout_and_define_symbols(objects, global_symbol_table, total_text_size, total_data_size, base_addr, emit_header)) {
         return false;
     }
 
@@ -441,14 +475,20 @@ bool link_objects(const std::vector<std::string>& input_files,
         return false;
     }
 
+    // Determine entry point
+    uint32_t entry_point = base_addr;
+    if (global_symbol_table.count("__START__")) {
+        entry_point = global_symbol_table.at("__START__");
+    }
+
     // Pass 3: Write Output
-    if (!write_output(output_path, objects, total_text_size, total_data_size)) {
+    if (!write_output(output_path, objects, total_text_size, total_data_size, emit_header, entry_point)) {
         return false;
     }
 
     // Optional Pass 4: emit the symbol map for the profiler / debuggers.
     if (!map_path.empty()) {
-        if (!write_map(map_path, global_symbol_table, total_text_size, total_data_size)) {
+        if (!write_map(map_path, global_symbol_table, base_addr, total_text_size, total_data_size, emit_header)) {
             return false;
         }
     }

@@ -42,6 +42,21 @@ struct RelocEntry {
     uint32_t type;        // 0=ABSOLUTE, 1=RELATIVE
 };
 
+// MBIN v2 Executable Header
+const uint32_t MBIN_MAGIC = 0x4D42494E; // 'MBIN'
+const uint32_t MBIN_VERSION_1 = 1;
+
+struct MbinHeader {
+    uint32_t magic;         // 0x4D42494E ("MBIN")
+    uint32_t version;       // 1
+    uint32_t entry_point;   // Initial PC (virtual address)
+    uint32_t text_offset;   // File offset to .text (32 bytes)
+    uint32_t text_size;     // Size of .text in bytes
+    uint32_t data_offset;   // File offset to .data (32 + text_size)
+    uint32_t data_size;     // Size of .data in bytes
+    uint32_t bss_size;      // Size of .bss in bytes (0 for now)
+};
+
 #pragma pack(pop)
 
 #endif // OBJECT_FORMAT_H

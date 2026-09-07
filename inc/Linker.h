@@ -27,6 +27,7 @@ struct LoadedObject {
 bool link_objects(const std::vector<std::string>& input_files,
                   const std::string& output_path,
                   const std::string& map_path,
-                  uint32_t base_addr);
+                  uint32_t base_addr,
+                  bool emit_header = false);
 
 #endif  // MYCCLINKER_LINKER_H
