@@ -1,0 +1,9 @@
+{
+    "text": [0, 0, 0, 0, 0, 0, 0, 0],
+    "data": [],
+    "symbols": [
+        {"name": "real", "type": 1, "section": 0, "offset": 0},
+        {"name": "mock_entry", "type": 1, "section": 0, "offset": 4}
+    ],
+    "relocs": []
+}

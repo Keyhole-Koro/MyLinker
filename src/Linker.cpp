@@ -79,9 +79,15 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
                                uint32_t& total_text_size,
                                uint32_t& total_data_size,
                                uint32_t base_addr,
-                               bool emit_header) {
+                               bool emit_header,
+                               const std::vector<LinkRedirect>& redirects) {
     std::set<std::string> needed_symbols;
     needed_symbols.insert("__START__");
+    for (const auto& redirect : redirects) {
+        // A redirect entry may otherwise have no ordinary references before
+        // relocation rewriting, so it must be live from the first pass.
+        needed_symbols.insert(redirect.to);
+    }
 
     std::vector<bool> object_active(objects.size(), false);
     bool changed = true;
@@ -198,11 +204,39 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
     return true;
 }
 
+bool object_defines_symbol(const LoadedObject& object, const std::string& name) {
+    for (const auto& symbol : object.symbols) {
+        if (symbol.type == SYMBOL_DEFINED && name == symbol.name) return true;
+    }
+    return false;
+}
+
+const LinkRedirect* redirect_for(const std::vector<LinkRedirect>& redirects,
+                                 const std::string& symbol_name,
+                                 const LoadedObject& object) {
+    for (const auto& redirect : redirects) {
+        if (redirect.from == symbol_name && !object_defines_symbol(object, redirect.to)) {
+            return &redirect;
+        }
+    }
+    return nullptr;
+}
+
 bool apply_relocations(std::vector<LoadedObject>& objects,
-                       const std::map<std::string, uint32_t>& global_symbol_table) {
+                       const std::map<std::string, uint32_t>& global_symbol_table,
+                       const std::vector<LinkRedirect>& redirects) {
     for (auto& obj : objects) {
         for (const auto& reloc : obj.relocs) {
             std::string sym_name(reloc.symbol_name);
+
+            // Test interception changes only direct control-flow relocations.
+            // Absolute references (for example taking a function address) keep
+            // their source identity so production ABI remains unchanged.
+            if (reloc.type == RELOC_RELATIVE) {
+                if (const LinkRedirect* redirect = redirect_for(redirects, sym_name, obj)) {
+                    sym_name = redirect->to;
+                }
+            }
 
             if (global_symbol_table.find(sym_name) == global_symbol_table.end()) {
                 std::cerr << "Error: Undefined symbol '" << sym_name << "' referenced in "
@@ -449,7 +483,8 @@ bool link_objects(const std::vector<std::string>& input_files,
                   const std::string& output_path,
                   const std::string& map_path,
                   uint32_t base_addr,
-                  bool emit_header) {
+                  bool emit_header,
+                  const std::vector<LinkRedirect>& redirects) {
     std::vector<LoadedObject> objects;
     objects.reserve(input_files.size());
 
@@ -466,12 +501,24 @@ bool link_objects(const std::vector<std::string>& input_files,
     std::map<std::string, uint32_t> global_symbol_table;
     uint32_t total_text_size = 0;
     uint32_t total_data_size = 0;
-    if (!layout_and_define_symbols(objects, global_symbol_table, total_text_size, total_data_size, base_addr, emit_header)) {
+    if (!layout_and_define_symbols(objects, global_symbol_table, total_text_size, total_data_size,
+                                   base_addr, emit_header, redirects)) {
         return false;
     }
 
+    for (const auto& redirect : redirects) {
+        if (!global_symbol_table.count(redirect.from)) {
+            std::cerr << "Error: redirect source symbol '" << redirect.from << "' is undefined" << std::endl;
+            return false;
+        }
+        if (!global_symbol_table.count(redirect.to)) {
+            std::cerr << "Error: redirect entry symbol '" << redirect.to << "' is undefined" << std::endl;
+            return false;
+        }
+    }
+
     // Pass 2: Relocation & Patching
-    if (!apply_relocations(objects, global_symbol_table)) {
+    if (!apply_relocations(objects, global_symbol_table, redirects)) {
         return false;
     }
 
