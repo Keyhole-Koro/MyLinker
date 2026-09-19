@@ -8,7 +8,7 @@ import struct
 import sys
 from pathlib import Path
 
-MAGIC = 0x4C4E4B31  # "LNK1"
+MAGIC = 0x4C4E4B32  # "LNK2"
 
 SECTION_NAMES = {
     0: "TEXT",
@@ -45,12 +45,12 @@ def hexdump(data: bytes, base: int = 0, width: int = 16):
 
 def parse_obj(path: Path):
     buf = path.read_bytes()
-    hdr_size = struct.calcsize("<IIIII")
+    hdr_size = struct.calcsize("<IIIIII")
     if len(buf) < hdr_size:
         raise ValueError("File too small to contain header")
 
-    magic, text_size, data_size, sym_cnt, reloc_cnt = struct.unpack_from(
-        "<IIIII", buf, 0
+    magic, text_size, data_size, sym_cnt, reloc_cnt, collect_cnt = struct.unpack_from(
+        "<IIIIII", buf, 0
     )
     if magic != MAGIC:
         raise ValueError(f"Bad magic 0x{magic:08x} (expected 0x{MAGIC:08x})")
@@ -92,16 +92,27 @@ def parse_obj(path: Path):
         )
         off += reloc_struct.size
 
+    collects = []
+    collect_struct = struct.Struct("<64sII")
+    for _ in range(collect_cnt):
+        if off + collect_struct.size > len(buf):
+            raise ValueError("Truncated collected-section table")
+        raw = collect_struct.unpack_from(buf, off)
+        collects.append({"name": read_cstring(raw[0]), "offset": raw[1], "size": raw[2]})
+        off += collect_struct.size
+
     return {
         "text": text,
         "data": data_sec,
         "symbols": syms,
         "relocs": relocs,
+        "collects": collects,
         "header": {
             "text_size": text_size,
             "data_size": data_size,
             "sym_cnt": sym_cnt,
             "reloc_cnt": reloc_cnt,
+            "collect_cnt": collect_cnt,
         },
     }
 
@@ -138,6 +149,10 @@ def dump_obj(path: Path, args):
                 f"  [{idx:02d}] {s['name']:<20} type={stype:<5} section={sect:<4} offset=0x{s['offset']:x}"
             )
 
+    if obj["collects"]:
+        print("Collected sections:")
+        for idx, c in enumerate(obj["collects"]):
+            print(f"  [{idx}] {c['name']}: text+0x{c['offset']:x}, {c['size']} bytes")
     if obj["relocs"]:
         print("\nRelocations:")
         for idx, r in enumerate(obj["relocs"]):

@@ -16,11 +16,12 @@ To support linking, `MyAssembler` must be updated to produce a structured object
 ### 3.1 File Header (Fixed Size)
 | Offset | Size (Bytes) | Field | Description |
 |--------|--------------|-------|-------------|
-| 0 | 4 | Magic | `0x4C4E4B31` ("LNK1") |
+| 0 | 4 | Magic | `0x4C4E4B32` ("LNK2") |
 | 4 | 4 | Text Size | Size of the machine code section |
 | 8 | 4 | Data Size | Size of the data section |
 | 12 | 4 | SymTable Count | Number of entries in Symbol Table |
 | 16 | 4 | Reloc Count | Number of entries in Relocation Table |
+| 20 | 4 | Collect Count | Number of CollectEntry records (LNK2) |
 
 ### 3.2 Sections
 The file follows this layout:
@@ -49,9 +50,31 @@ Describes where the code needs patching.
 struct RelocEntry {
     uint32_t offset;      // Offset in the TEXT section to patch
     char symbol_name[64]; // Name of the symbol to resolve
-    uint32_t type;        // 0=ABSOLUTE (32-bit addr), 1=RELATIVE (26-bit jump)
+    uint32_t type;        // 0=ABSOLUTE (21-bit MOVI immediate), 1=RELATIVE (26-bit jump), 2=WORD32 (.word symbol)
 };
 ```
+
+`WORD32` writes the symbol's address into all 32 bits of a data word emitted
+by `.word symbol`; `ABSOLUTE` patches only the low 21 bits of a `MOVI`.
+
+### 3.5 Collected-Section Entry (LNK2)
+The header's `collect_count` records how many of these follow the
+relocations. Each marks a chunk of this object's TEXT that belongs to a
+named collected section (`.section name` in the assembly):
+
+```c
+struct CollectEntry {
+    char name[64];
+    uint32_t offset;      // Offset of the chunk in the TEXT section
+    uint32_t size;        // Chunk size in bytes
+};
+```
+
+The linker gathers every object's chunks of one name, in link order, into an
+index placed after the data sections: `__<name>_start` points at
+`(address, size)` pairs, one per chunk, `__<name>_end` at the word after the
+last. An object with a `CollectEntry` is kept live even if nothing refers to
+it. Full specification: `docs/design/toolchain-collected-sections.md`.
 
 ## 4. Required Modifications to `MyAssembler`
 The assembler currently acts as a "load-and-go" builder. It needs a new mode (e.g., `-c` flag):

@@ -15,6 +15,7 @@ struct LoadedObject {
     std::vector<uint8_t> data_section;
     std::vector<SymbolEntry> symbols;
     std::vector<RelocEntry> relocs;
+    std::vector<CollectEntry> collects;
 
     // Calculated during Pass 1
     uint32_t text_base_addr;

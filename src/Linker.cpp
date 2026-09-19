@@ -24,6 +24,10 @@ namespace {
 // per object and offers no way to drop a single function's range -- only the
 // reference is deduplicated. Dropping the code too would need per-function
 // sections and a group signature in the object format.
+// Bytes of the collected-section index, built during layout and written
+// after the data sections (see ObjectFormat.h, CollectEntry).
+static std::vector<uint8_t> collect_index;
+
 static bool is_mergeable_instantiation(const char* name) {
     static const char kPrefix[] = "__mlg_";
     return std::strncmp(name, kPrefix, sizeof(kPrefix) - 1) == 0;
@@ -71,6 +75,13 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
                   obj.header.reloc_count * sizeof(RelocEntry));
     }
 
+    // Read collected-section chunks
+    obj.collects.resize(obj.header.collect_count);
+    if (obj.header.collect_count > 0) {
+        file.read(reinterpret_cast<char*>(obj.collects.data()),
+                  obj.header.collect_count * sizeof(CollectEntry));
+    }
+
     return true;
 }
 
@@ -90,6 +101,12 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
     }
 
     std::vector<bool> object_active(objects.size(), false);
+    // An object that contributes to a collected section is live by that
+    // fact: a table entry is a registration, and nothing else may refer to
+    // the object (an app module is only ever reached through its rows).
+    for (size_t i = 0; i < objects.size(); ++i) {
+        if (!objects[i].collects.empty()) object_active[i] = true;
+    }
     bool changed = true;
 
     // Dependency Resolution Loop
@@ -154,6 +171,7 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
     uint32_t current_data_addr = emit_header ? ((base_addr + total_text_size + 4095u) & ~4095u)
                                              : (base_addr + total_text_size);
 
+    std::map<std::string, std::string> all_definitions; // name -> first defining object
     for (auto& obj : objects) {
         obj.text_base_addr = current_text_addr;
         obj.data_base_addr = current_data_addr;
@@ -163,6 +181,24 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
 
         for (const auto& sym : obj.symbols) {
             if (sym.type == SYMBOL_DEFINED) {
+                // Two objects defining the same name is an error whether or
+                // not anyone references it: a reference would silently bind
+                // to whichever came first. Private labels are excluded: the
+                // assembler tags them `name-[module:n]` with the file's stem,
+                // so two files with the same stem in different directories
+                // (TestKit's runtime/verdict.mln and platform/.../verdict.mln)
+                // repeat tags, and such labels are never referenced across
+                // objects anyway.
+                if (!is_mergeable_instantiation(sym.name) && std::strstr(sym.name, "-[") == nullptr) {
+                    auto seen = all_definitions.find(sym.name);
+                    if (seen != all_definitions.end()) {
+                        std::cerr << "Error: Duplicate symbol definition '" << sym.name
+                                  << "' in " << obj.filename << " (first defined in "
+                                  << seen->second << ")" << std::endl;
+                        return false;
+                    }
+                    all_definitions[sym.name] = obj.filename;
+                }
                 // Only register if needed (Narrow Scope)
                 if (needed_symbols.count(sym.name)) {
                      uint32_t final_addr = 0;
@@ -186,6 +222,39 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
         }
     }
     
+    // Collected sections: one index per section name, laid out after every
+    // object's data. `__<name>_start` -> (chunk address, chunk size) pairs in
+    // link order; `__<name>_end` -> the word after the last pair. Readers
+    // walk the pairs (each pair is 8 bytes) and read the chunks in place.
+    collect_index.clear();
+    {
+        std::vector<std::string> names; // first-seen order
+        std::map<std::string, std::vector<std::pair<uint32_t, uint32_t>>> chunks;
+        for (const auto& obj : objects) {
+            for (const auto& ce : obj.collects) {
+                std::string name(ce.name);
+                if (!chunks.count(name)) names.push_back(name);
+                chunks[name].push_back({obj.text_base_addr + ce.offset, ce.size});
+            }
+        }
+        for (const auto& name : names) {
+            uint32_t start = current_data_addr + static_cast<uint32_t>(collect_index.size());
+            for (const auto& pair : chunks[name]) {
+                for (uint32_t v : {pair.first, pair.second}) {
+                    collect_index.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+                    collect_index.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+                    collect_index.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+                    collect_index.push_back(static_cast<uint8_t>(v & 0xFF));
+                }
+            }
+            uint32_t end = current_data_addr + static_cast<uint32_t>(collect_index.size());
+            global_symbol_table["__" + name + "_start"] = start;
+            global_symbol_table["__" + name + "_end"] = end;
+        }
+        current_data_addr += static_cast<uint32_t>(collect_index.size());
+        total_data_size += static_cast<uint32_t>(collect_index.size());
+    }
+
     // Synthesize the `_end` symbol marking the end of the loaded image
     // (text + data). The kernel heap allocator uses this as the start of its
     // free region. current_data_addr has advanced past the last data section.
@@ -258,7 +327,7 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
             uint32_t value_to_write = 0;
             uint32_t instruction_addr = obj.text_base_addr + patch_offset;
 
-            if (reloc.type == RELOC_ABSOLUTE) {
+            if (reloc.type == RELOC_ABSOLUTE || reloc.type == RELOC_WORD32) {
                 value_to_write = target_addr;
             } else if (reloc.type == RELOC_RELATIVE) {
                 // Relative Jump: follow assembler's encoding, which uses (target - currentPC)
@@ -341,7 +410,10 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
 
             uint32_t final_val = 0;
 
-            if (reloc.type == RELOC_RELATIVE) {
+            if (reloc.type == RELOC_WORD32) {
+                // A data word (.word symbol): the whole 32 bits are the address.
+                final_val = value_to_write;
+            } else if (reloc.type == RELOC_RELATIVE) {
                 // Preserving top 6 bits (Opcode) - Assumption based on typical custom CPU
                 // And assuming the offset field is the lower 26 bits.
                 // Check if offset fits in 26 bits?
@@ -418,6 +490,11 @@ bool write_output(const std::string& output_path,
             outfile.write(reinterpret_cast<const char*>(obj.data_section.data()),
                           obj.data_section.size());
         }
+    }
+
+    // Then the collected-section index (see layout_and_define_symbols).
+    if (!collect_index.empty()) {
+        outfile.write(reinterpret_cast<const char*>(collect_index.data()), collect_index.size());
     }
 
     std::cout << "Successfully created " << output_path << std::endl;

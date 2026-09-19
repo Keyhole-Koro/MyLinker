@@ -1,0 +1,7 @@
+{
+    "text": [0, 0, 0, 21, 0, 0, 0, 22, 0, 0, 0, 23],
+    "data": [],
+    "symbols": [ {"name": "rowsB", "type": 1, "section": 0, "offset": 0} ],
+    "relocs": [],
+    "collects": [ {"name": "rows", "offset": 0, "size": 12} ]
+}

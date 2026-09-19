@@ -25,6 +25,12 @@ TESTS = [
     # must therefore become +8 rather than its original +4 target.
     ("test_redirect", ["test_redirect_A.json", "test_redirect_B.json"], True,
      ["--redirect", "real=mock_entry"], (4, 0x6C000008)),
+    # Two objects each contribute a chunk to the collected section `rows`.
+    # The index goes after the data (text is 16 + 12 = 28 bytes): first pair
+    # is A's chunk at 0x8, 8 bytes -- so the word at 28 reads 8. B is kept
+    # although nothing references it: contributing to a section is what
+    # makes an object live.
+    ("test_collect", ["test_collect_A.json", "test_collect_B.json"], True, [], (28, 0x00000008)),
 ]
 
 

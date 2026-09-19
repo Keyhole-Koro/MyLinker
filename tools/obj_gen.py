@@ -3,7 +3,7 @@ import json
 import sys
 
 # Constants
-MAGIC = 0x4C4E4B31
+MAGIC = 0x4C4E4B32  # "LNK2"
 SECTION_TEXT = 0
 SECTION_DATA = 1
 SYMBOL_UNDEFINED = 0
@@ -29,12 +29,15 @@ def create_object_file(json_path, output_path):
     # uint32_t symtable_count;
     # uint32_t reloc_count;
     
-    header = struct.pack('<IIIII', 
-                         MAGIC, 
-                         len(text_bytes), 
-                         len(data_bytes), 
-                         len(symbols), 
-                         len(relocs))
+    collects = data.get('collects', [])
+
+    header = struct.pack('<IIIIII',
+                         MAGIC,
+                         len(text_bytes),
+                         len(data_bytes),
+                         len(symbols),
+                         len(relocs),
+                         len(collects))
 
     with open(output_path, 'wb') as out:
         out.write(header)
@@ -62,7 +65,16 @@ def create_object_file(json_path, output_path):
             sym_name = sym_name + b'\0' * (64 - len(sym_name))
             entry = struct.pack('<I64sI', reloc['offset'], sym_name, reloc['type'])
             out.write(entry)
-            
+
+        # Write collected-section chunks
+        # char name[64];
+        # uint32_t offset;
+        # uint32_t size;
+        for ce in collects:
+            name = ce['name'].encode('utf-8')
+            name = name + b'\0' * (64 - len(name))
+            out.write(struct.pack('<64sII', name, ce['offset'], ce['size']))
+
     print(f"Created {output_path}")
 
 if __name__ == "__main__":
