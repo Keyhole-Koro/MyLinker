@@ -3,7 +3,7 @@ import json
 import sys
 
 # Constants
-MAGIC = 0x4C4E4B32  # "LNK2"
+MAGIC = 0x4C4E4B33  # "LNK3"
 SECTION_TEXT = 0
 SECTION_DATA = 1
 SYMBOL_UNDEFINED = 0
@@ -30,19 +30,22 @@ def create_object_file(json_path, output_path):
     # uint32_t reloc_count;
     
     collects = data.get('collects', [])
+    blob_bytes = bytes(data.get('blob', []))
 
-    header = struct.pack('<IIIIII',
+    header = struct.pack('<IIIIIII',
                          MAGIC,
                          len(text_bytes),
                          len(data_bytes),
                          len(symbols),
                          len(relocs),
-                         len(collects))
+                         len(collects),
+                         len(blob_bytes))
 
     with open(output_path, 'wb') as out:
         out.write(header)
         out.write(text_bytes)
         out.write(data_bytes)
+        out.write(blob_bytes)
         
         # Write Symbols
         # char name[64];
@@ -63,7 +66,7 @@ def create_object_file(json_path, output_path):
         for reloc in relocs:
             sym_name = reloc['symbol_name'].encode('utf-8')
             sym_name = sym_name + b'\0' * (64 - len(sym_name))
-            entry = struct.pack('<I64sI', reloc['offset'], sym_name, reloc['type'])
+            entry = struct.pack('<I64sII', reloc['offset'], sym_name, reloc['type'], reloc.get('section', 0))
             out.write(entry)
 
         # Write collected-section chunks

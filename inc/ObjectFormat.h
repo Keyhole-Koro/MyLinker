@@ -3,13 +3,14 @@
 
 #include <stdint.h>
 
-// Magic number: "LNK2" -> 0x4C4E4B32 (LNK1 + collected sections, see CollectEntry).
+// Magic number: "LNK3" -> 0x4C4E4B33 (LNK1 + collected sections, see CollectEntry).
 // However, checking endianness might be important. Let's assume Little Endian for now as is common.
-const uint32_t LINKER_MAGIC = 0x4C4E4B32;
+const uint32_t LINKER_MAGIC = 0x4C4E4B33;
 
 // Section Types
 const uint32_t SECTION_TEXT = 0;
 const uint32_t SECTION_DATA = 1;
+const uint32_t SECTION_COLLECT = 2; // the object's collected-section blob (see CollectEntry)
 
 // Symbol Types
 const uint32_t SYMBOL_UNDEFINED = 0; // Import
@@ -29,6 +30,7 @@ struct FileHeader {
     uint32_t symtable_count;
     uint32_t reloc_count;
     uint32_t collect_count;   // CollectEntry records after the relocations
+    uint32_t collect_size;    // bytes of the collected-section blob (after the data section)
 };
 
 struct SymbolEntry {
@@ -39,22 +41,30 @@ struct SymbolEntry {
 };
 
 struct RelocEntry {
-    uint32_t offset;      // Offset in the TEXT section to patch
+    uint32_t offset;      // Offset to patch, within `section`
     char symbol_name[64]; // Name of the symbol to resolve
     uint32_t type;        // 0=ABSOLUTE, 1=RELATIVE, 2=WORD32
+    uint32_t section;     // 0=TEXT, 2=COLLECT (the blob)
 };
 
-// A chunk of this object's TEXT that belongs to a named collected section
-// (`.section name` in the assembly). The linker gathers every object's
-// chunks of the same name, in link order, into an index it places after the
-// data: `__<name>_start` points at (address, size) pairs, one per chunk, and
-// `__<name>_end` at the word after the last. Readers walk the pairs; the
-// chunk bytes themselves stay where the assembler put them. This is how a
-// declaration in one object lands in a table nobody wrote by hand -- the
-// compiler's annotation rows, for one.
+// A chunk of a named collected section (`.section name` in the assembly).
+// The chunk's bytes live in the object's collected-section blob, which
+// follows the data section; `offset` locates the chunk there. The linker
+// lays every object's chunks of one name out contiguously, in link order,
+// after the data sections, so the section reads as one array, and defines
+// `__section_<name>` (its first byte) and `__section_<name>_size` (a word
+// holding its byte count). After the last section comes the directory,
+// `__sections`: one [name (char*), start, size] row per section and a zero
+// row, then the name strings, so a section can be found by string at
+// runtime too (MyStdLib memory/section.mln). `__section_<name>_size` is
+// the address of that section's row's size word. Symbols and relocations
+// inside a chunk use SECTION_COLLECT with blob offsets. An object that contributes a chunk is
+// kept live: a table entry is a registration, whether or not anything else
+// refers to the object. This is how a declaration in one object lands in a
+// table nobody wrote by hand -- the compiler's annotation rows, for one.
 struct CollectEntry {
     char name[64];
-    uint32_t offset;      // Offset of the chunk in the TEXT section
+    uint32_t offset;      // Offset of the chunk in the collected-section blob
     uint32_t size;        // Chunk size in bytes
 };
 

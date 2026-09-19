@@ -1,10 +1,11 @@
 {
-    "text": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 0, 12],
+    "text": [1, 0, 0, 0, 0, 0, 0, 0],
     "data": [],
+    "blob": [0, 0, 0, 11, 0, 0, 0, 12],
     "symbols": [
         {"name": "__START__", "type": 1, "section": 0, "offset": 0},
-        {"name": "rowsA", "type": 1, "section": 0, "offset": 8}
+        {"name": "rowsA", "type": 1, "section": 2, "offset": 0}
     ],
     "relocs": [],
-    "collects": [ {"name": "rows", "offset": 8, "size": 8} ]
+    "collects": [ {"name": "rows", "offset": 0, "size": 8} ]
 }

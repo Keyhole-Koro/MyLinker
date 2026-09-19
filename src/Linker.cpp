@@ -24,9 +24,28 @@ namespace {
 // per object and offers no way to drop a single function's range -- only the
 // reference is deduplicated. Dropping the code too would need per-function
 // sections and a group signature in the object format.
-// Bytes of the collected-section index, built during layout and written
-// after the data sections (see ObjectFormat.h, CollectEntry).
-static std::vector<uint8_t> collect_index;
+// Collected sections, laid out during layout_and_define_symbols and written
+// after the data sections (see ObjectFormat.h, CollectEntry): every chunk of
+// one name contiguously in link order, then the section directory
+// (`__sections`): one `[name, start, size]` row per section and a zero row,
+// followed by the name strings. `__section_<name>` is a section's start and
+// `__section_<name>_size` the address of its row's size word, so a reader
+// can either name a section statically or look it up by string at runtime.
+struct CollectedSection {
+    std::string name;
+    uint32_t start;                               // final address of the first byte
+    uint32_t size;                                // bytes, all chunks
+    std::vector<std::pair<size_t, size_t>> chunks; // (object index, CollectEntry index) in link order
+};
+static std::vector<CollectedSection> collected_sections;
+static std::vector<uint8_t> collect_index;        // the directory, after the chunks
+
+static void push_word_be(std::vector<uint8_t>& out, uint32_t v) {
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+}
 
 static bool is_mergeable_instantiation(const char* name) {
     static const char kPrefix[] = "__mlg_";
@@ -59,6 +78,12 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
     obj.data_section.resize(obj.header.data_size);
     if (obj.header.data_size > 0) {
         file.read(reinterpret_cast<char*>(obj.data_section.data()), obj.header.data_size);
+    }
+
+    // Read the collected-section blob
+    obj.collect_blob.resize(obj.header.collect_size);
+    if (obj.header.collect_size > 0) {
+        file.read(reinterpret_cast<char*>(obj.collect_blob.data()), obj.header.collect_size);
     }
 
     // Read Symbols
@@ -171,6 +196,64 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
     uint32_t current_data_addr = emit_header ? ((base_addr + total_text_size + 4095u) & ~4095u)
                                              : (base_addr + total_text_size);
 
+    // Pre-pass: text and data bases, then the collected sections after all
+    // data -- each name's chunks contiguous in link order -- so a symbol
+    // inside a chunk can be given its final address below.
+    {
+        uint32_t text_at = current_text_addr;
+        uint32_t data_at = current_data_addr;
+        for (auto& obj : objects) {
+            obj.text_base_addr = text_at;
+            obj.data_base_addr = data_at;
+            text_at += obj.header.text_size;
+            data_at += obj.header.data_size;
+        }
+        collected_sections.clear();
+        collect_index.clear();
+        for (size_t oi = 0; oi < objects.size(); ++oi) {
+            objects[oi].chunk_base_addr.assign(objects[oi].collects.size(), 0);
+            for (size_t ci = 0; ci < objects[oi].collects.size(); ++ci) {
+                std::string name(objects[oi].collects[ci].name);
+                CollectedSection* sec = nullptr;
+                for (auto& s : collected_sections) if (s.name == name) sec = &s;
+                if (!sec) { collected_sections.push_back({name, 0, 0, {}}); sec = &collected_sections.back(); }
+                sec->chunks.push_back({oi, ci});
+            }
+        }
+        uint32_t at = data_at;
+        for (auto& sec : collected_sections) {
+            sec.start = at;
+            for (const auto& ref : sec.chunks) {
+                objects[ref.first].chunk_base_addr[ref.second] = at;
+                at += objects[ref.first].collects[ref.second].size;
+            }
+            sec.size = at - sec.start;
+        }
+        // The directory, after every chunk: rows first, then the names they
+        // point at. Always present (a lone zero row when nothing was
+        // collected) so `__sections` can be imported unconditionally.
+        const uint32_t row_bytes = 12;
+        uint32_t names_at = at + static_cast<uint32_t>((collected_sections.size() + 1) * row_bytes);
+        std::vector<uint8_t> names;
+        for (size_t i = 0; i < collected_sections.size(); ++i) {
+            const auto& sec = collected_sections[i];
+            push_word_be(collect_index, names_at + static_cast<uint32_t>(names.size()));
+            push_word_be(collect_index, sec.start);
+            push_word_be(collect_index, sec.size);
+            names.insert(names.end(), sec.name.begin(), sec.name.end());
+            names.push_back(0);
+            while (names.size() % 4 != 0) names.push_back(0);
+            global_symbol_table["__section_" + sec.name] = sec.start;
+            global_symbol_table["__section_" + sec.name + "_size"] = at + static_cast<uint32_t>(i * row_bytes) + 8;
+        }
+        push_word_be(collect_index, 0);
+        push_word_be(collect_index, 0);
+        push_word_be(collect_index, 0);
+        collect_index.insert(collect_index.end(), names.begin(), names.end());
+        global_symbol_table["__sections"] = at;
+        total_data_size += (at - data_at) + static_cast<uint32_t>(collect_index.size());
+    }
+
     std::map<std::string, std::string> all_definitions; // name -> first defining object
     for (auto& obj : objects) {
         obj.text_base_addr = current_text_addr;
@@ -206,6 +289,15 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
                         final_addr = obj.text_base_addr + sym.offset;
                     } else if (sym.section == SECTION_DATA) {
                         final_addr = obj.data_base_addr + sym.offset;
+                    } else if (sym.section == SECTION_COLLECT) {
+                        // Inside whichever chunk of the blob holds the offset.
+                        for (size_t ci = 0; ci < obj.collects.size(); ++ci) {
+                            const auto& ce = obj.collects[ci];
+                            if (sym.offset >= ce.offset && sym.offset < ce.offset + ce.size) {
+                                final_addr = obj.chunk_base_addr[ci] + (sym.offset - ce.offset);
+                                break;
+                            }
+                        }
                     }
 
                     if (global_symbol_table.count(sym.name)) {
@@ -222,38 +314,10 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
         }
     }
     
-    // Collected sections: one index per section name, laid out after every
-    // object's data. `__<name>_start` -> (chunk address, chunk size) pairs in
-    // link order; `__<name>_end` -> the word after the last pair. Readers
-    // walk the pairs (each pair is 8 bytes) and read the chunks in place.
-    collect_index.clear();
-    {
-        std::vector<std::string> names; // first-seen order
-        std::map<std::string, std::vector<std::pair<uint32_t, uint32_t>>> chunks;
-        for (const auto& obj : objects) {
-            for (const auto& ce : obj.collects) {
-                std::string name(ce.name);
-                if (!chunks.count(name)) names.push_back(name);
-                chunks[name].push_back({obj.text_base_addr + ce.offset, ce.size});
-            }
-        }
-        for (const auto& name : names) {
-            uint32_t start = current_data_addr + static_cast<uint32_t>(collect_index.size());
-            for (const auto& pair : chunks[name]) {
-                for (uint32_t v : {pair.first, pair.second}) {
-                    collect_index.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
-                    collect_index.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
-                    collect_index.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-                    collect_index.push_back(static_cast<uint8_t>(v & 0xFF));
-                }
-            }
-            uint32_t end = current_data_addr + static_cast<uint32_t>(collect_index.size());
-            global_symbol_table["__" + name + "_start"] = start;
-            global_symbol_table["__" + name + "_end"] = end;
-        }
-        current_data_addr += static_cast<uint32_t>(collect_index.size());
-        total_data_size += static_cast<uint32_t>(collect_index.size());
-    }
+    // The collected sections were laid out in the pre-pass above and sit
+    // between the last data section and `_end`.
+    for (const auto& sec : collected_sections) current_data_addr += sec.size;
+    current_data_addr += static_cast<uint32_t>(collect_index.size());
 
     // Synthesize the `_end` symbol marking the end of the loaded image
     // (text + data). The kernel heap allocator uses this as the start of its
@@ -314,10 +378,12 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
             }
 
             uint32_t target_addr = global_symbol_table.at(sym_name);
-            uint32_t patch_offset = reloc.offset; // Offset within this file's TEXT section
+            uint32_t patch_offset = reloc.offset; // Offset within this file's TEXT section or blob
+            bool in_blob = reloc.section == SECTION_COLLECT;
+            std::vector<uint8_t>& section_bytes = in_blob ? obj.collect_blob : obj.text_section;
 
             // Check bounds
-            if (patch_offset + 4 > obj.text_section.size()) {
+            if (patch_offset + 4 > section_bytes.size()) {
                 std::cerr << "Error: Relocation offset out of bounds in " << obj.filename
                           << std::endl;
                 return false;
@@ -326,6 +392,11 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
             // Calculate value to write
             uint32_t value_to_write = 0;
             uint32_t instruction_addr = obj.text_base_addr + patch_offset;
+            if (in_blob && reloc.type != RELOC_WORD32) {
+                std::cerr << "Error: only .word relocations are allowed in a collected section ("
+                          << obj.filename << ")" << std::endl;
+                return false;
+            }
 
             if (reloc.type == RELOC_ABSOLUTE || reloc.type == RELOC_WORD32) {
                 value_to_write = target_addr;
@@ -369,7 +440,7 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
                 // But for now, I will assume a standard mask: 0xFC000000 is opcode, 0x03FFFFFF is offset.
 
                 uint32_t current_inst = 0;
-                memcpy(&current_inst, &obj.text_section[patch_offset], 4);
+                memcpy(&current_inst, &section_bytes[patch_offset], 4);
                 (void)current_inst;
 
                 // Mask: Keep top 6 bits, replace bottom 26
@@ -402,7 +473,7 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
             // Apply patch
             // We need to read existing to preserve bits if it's not a full overwrite
             // Handle Big Endian read/write manually to avoid host endianness issues
-            uint8_t* ptr = &obj.text_section[patch_offset];
+            uint8_t* ptr = &section_bytes[patch_offset];
             uint32_t existing = (static_cast<uint32_t>(ptr[0]) << 24) |
                                 (static_cast<uint32_t>(ptr[1]) << 16) |
                                 (static_cast<uint32_t>(ptr[2]) << 8)  |
@@ -492,7 +563,17 @@ bool write_output(const std::string& output_path,
         }
     }
 
-    // Then the collected-section index (see layout_and_define_symbols).
+    // Then the collected sections: each name's chunks contiguously, in the
+    // order layout_and_define_symbols assigned, then the size words.
+    for (const auto& sec : collected_sections) {
+        for (const auto& ref : sec.chunks) {
+            const auto& obj = objects[ref.first];
+            const auto& ce = obj.collects[ref.second];
+            if (ce.size > 0) {
+                outfile.write(reinterpret_cast<const char*>(&obj.collect_blob[ce.offset]), ce.size);
+            }
+        }
+    }
     if (!collect_index.empty()) {
         outfile.write(reinterpret_cast<const char*>(collect_index.data()), collect_index.size());
     }

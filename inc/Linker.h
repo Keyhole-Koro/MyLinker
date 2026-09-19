@@ -16,6 +16,8 @@ struct LoadedObject {
     std::vector<SymbolEntry> symbols;
     std::vector<RelocEntry> relocs;
     std::vector<CollectEntry> collects;
+    std::vector<uint8_t> collect_blob;      // bytes of every chunk, at CollectEntry offsets
+    std::vector<uint32_t> chunk_base_addr;  // final address of each chunk (parallel to collects)
 
     // Calculated during Pass 1
     uint32_t text_base_addr;

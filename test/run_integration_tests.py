@@ -26,11 +26,15 @@ TESTS = [
     ("test_redirect", ["test_redirect_A.json", "test_redirect_B.json"], True,
      ["--redirect", "real=mock_entry"], (4, 0x6C000008)),
     # Two objects each contribute a chunk to the collected section `rows`.
-    # The index goes after the data (text is 16 + 12 = 28 bytes): first pair
-    # is A's chunk at 0x8, 8 bytes -- so the word at 28 reads 8. B is kept
-    # although nothing references it: contributing to a section is what
-    # makes an object live.
-    ("test_collect", ["test_collect_A.json", "test_collect_B.json"], True, [], (28, 0x00000008)),
+    # The chunks are laid out contiguously after the data (text is 8 bytes):
+    # A's [11, 12] then B's [21, 22, 23], then the size word 20. The word at
+    # 8 + 8 (B's first) reads 21. B is kept although nothing references it:
+    # contributing to a section is what makes an object live.
+    ("test_collect", ["test_collect_A.json", "test_collect_B.json"], True, [], (16, 0x00000015)),
+    # Same link, the section directory: after the 20 chunk bytes (at 28) comes
+    # the row [name, start, size] = [52, 8, 20], a zero row at 40, "rows\0" at
+    # 52. The size word at 36 reads 20; `__section_rows_size` names that word.
+    ("test_collect_dir", ["test_collect_A.json", "test_collect_B.json"], True, [], (36, 0x00000014)),
 ]
 
 

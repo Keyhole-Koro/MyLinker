@@ -8,7 +8,7 @@ import struct
 import sys
 from pathlib import Path
 
-MAGIC = 0x4C4E4B32  # "LNK2"
+MAGIC = 0x4C4E4B33  # "LNK3"
 
 SECTION_NAMES = {
     0: "TEXT",
@@ -45,12 +45,12 @@ def hexdump(data: bytes, base: int = 0, width: int = 16):
 
 def parse_obj(path: Path):
     buf = path.read_bytes()
-    hdr_size = struct.calcsize("<IIIIII")
+    hdr_size = struct.calcsize("<IIIIIII")
     if len(buf) < hdr_size:
         raise ValueError("File too small to contain header")
 
-    magic, text_size, data_size, sym_cnt, reloc_cnt, collect_cnt = struct.unpack_from(
-        "<IIIIII", buf, 0
+    magic, text_size, data_size, sym_cnt, reloc_cnt, collect_cnt, collect_size = struct.unpack_from(
+        "<IIIIIII", buf, 0
     )
     if magic != MAGIC:
         raise ValueError(f"Bad magic 0x{magic:08x} (expected 0x{MAGIC:08x})")
@@ -60,6 +60,8 @@ def parse_obj(path: Path):
     off += text_size
     data_sec = buf[off : off + data_size]
     off += data_size
+    blob = buf[off : off + collect_size]
+    off += collect_size
 
     syms = []
     sym_struct = struct.Struct("<64sIII")
@@ -78,7 +80,7 @@ def parse_obj(path: Path):
         off += sym_struct.size
 
     relocs = []
-    reloc_struct = struct.Struct("<I64sI")
+    reloc_struct = struct.Struct("<I64sII")
     for _ in range(reloc_cnt):
         if off + reloc_struct.size > len(buf):
             raise ValueError("Truncated relocation table")
@@ -88,6 +90,7 @@ def parse_obj(path: Path):
                 "offset": raw[0],
                 "symbol_name": read_cstring(raw[1]),
                 "type": raw[2],
+                "section": raw[3],
             }
         )
         off += reloc_struct.size
@@ -107,6 +110,7 @@ def parse_obj(path: Path):
         "symbols": syms,
         "relocs": relocs,
         "collects": collects,
+        "blob": blob,
         "header": {
             "text_size": text_size,
             "data_size": data_size,
@@ -152,7 +156,7 @@ def dump_obj(path: Path, args):
     if obj["collects"]:
         print("Collected sections:")
         for idx, c in enumerate(obj["collects"]):
-            print(f"  [{idx}] {c['name']}: text+0x{c['offset']:x}, {c['size']} bytes")
+            print(f"  [{idx}] {c['name']}: blob+0x{c['offset']:x}, {c['size']} bytes")
     if obj["relocs"]:
         print("\nRelocations:")
         for idx, r in enumerate(obj["relocs"]):

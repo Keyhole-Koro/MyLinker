@@ -16,20 +16,23 @@ To support linking, `MyAssembler` must be updated to produce a structured object
 ### 3.1 File Header (Fixed Size)
 | Offset | Size (Bytes) | Field | Description |
 |--------|--------------|-------|-------------|
-| 0 | 4 | Magic | `0x4C4E4B32` ("LNK2") |
+| 0 | 4 | Magic | `0x4C4E4B33` ("LNK3") |
 | 4 | 4 | Text Size | Size of the machine code section |
 | 8 | 4 | Data Size | Size of the data section |
 | 12 | 4 | SymTable Count | Number of entries in Symbol Table |
 | 16 | 4 | Reloc Count | Number of entries in Relocation Table |
-| 20 | 4 | Collect Count | Number of CollectEntry records (LNK2) |
+| 20 | 4 | Collect Count | Number of CollectEntry records |
+| 24 | 4 | Collect Size | Size of the collected-section blob |
 
 ### 3.2 Sections
 The file follows this layout:
 1.  **Header**
 2.  **Text Section** (Raw machine code bytes)
 3.  **Data Section** (Raw data bytes)
-4.  **Symbol Table** (Array of SymbolEntry)
-5.  **Relocation Table** (Array of RelocEntry)
+4.  **Collected-Section Blob** (every `.section` chunk of this object, back to back)
+5.  **Symbol Table** (Array of SymbolEntry)
+6.  **Relocation Table** (Array of RelocEntry)
+7.  **Collected-Section Table** (Array of CollectEntry)
 
 ### 3.3 Symbol Table Entry
 Describes exported symbols (labels defined in this file) and imported symbols (externs).
@@ -38,7 +41,7 @@ Describes exported symbols (labels defined in this file) and imported symbols (e
 struct SymbolEntry {
     char name[64];      // Fixed size for simplicity
     uint32_t type;      // 0=UNDEFINED (Import), 1=DEFINED (Export)
-    uint32_t section;   // 0=TEXT, 1=DATA
+    uint32_t section;   // 0=TEXT, 1=DATA, 2=COLLECT (inside the blob)
     uint32_t offset;    // Offset relative to section start
 };
 ```
@@ -48,33 +51,38 @@ Describes where the code needs patching.
 
 ```c
 struct RelocEntry {
-    uint32_t offset;      // Offset in the TEXT section to patch
+    uint32_t offset;      // Offset in the section to patch
     char symbol_name[64]; // Name of the symbol to resolve
     uint32_t type;        // 0=ABSOLUTE (21-bit MOVI immediate), 1=RELATIVE (26-bit jump), 2=WORD32 (.word symbol)
+    uint32_t section;     // 0=TEXT, 2=COLLECT (a .word inside a chunk; WORD32 only)
 };
 ```
 
 `WORD32` writes the symbol's address into all 32 bits of a data word emitted
 by `.word symbol`; `ABSOLUTE` patches only the low 21 bits of a `MOVI`.
 
-### 3.5 Collected-Section Entry (LNK2)
+### 3.5 Collected-Section Entry
 The header's `collect_count` records how many of these follow the
-relocations. Each marks a chunk of this object's TEXT that belongs to a
+relocations. Each marks a chunk of this object's blob that belongs to a
 named collected section (`.section name` in the assembly):
 
 ```c
 struct CollectEntry {
     char name[64];
-    uint32_t offset;      // Offset of the chunk in the TEXT section
+    uint32_t offset;      // Offset of the chunk in the blob
     uint32_t size;        // Chunk size in bytes
 };
 ```
 
-The linker gathers every object's chunks of one name, in link order, into an
-index placed after the data sections: `__<name>_start` points at
-`(address, size)` pairs, one per chunk, `__<name>_end` at the word after the
-last. An object with a `CollectEntry` is kept live even if nothing refers to
-it. Full specification: `docs/design/toolchain-collected-sections.md`.
+The linker lays every object's chunks of one name out contiguously, in link
+order, after the data sections, so a section reads as one array. It defines
+`__section_<name>` (the first byte) and `__section_<name>_size` (a word
+holding the byte count), and after the last section writes a directory,
+`__sections`: one `[name (char*), start, size]` row per section and a zero
+row, then the name strings -- so a section can also be found by string at
+runtime (MyStdLib `memory/section.mln`). An object with a `CollectEntry` is
+kept live even if nothing refers to it. Full specification:
+`docs/design/toolchain-collected-sections.md`.
 
 ## 4. Required Modifications to `MyAssembler`
 The assembler currently acts as a "load-and-go" builder. It needs a new mode (e.g., `-c` flag):
