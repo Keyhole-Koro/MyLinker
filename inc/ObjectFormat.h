@@ -68,19 +68,29 @@ struct CollectEntry {
     uint32_t size;        // Chunk size in bytes
 };
 
-// MBIN v2 Executable Header
+// MBIN executable header (docs/design/mbin-executable-header.md).
+// Header version 2 adds `sections_offset`: where in the file the section
+// directory lies -- the same `[name, start, size]` rows and name strings
+// the linker places after the data as `__sections` -- so a reader can find
+// a collected section (the compiler's annotation table, say) in an image
+// on disk without loading it. Addresses inside the directory are virtual;
+// text maps at entry_point & ~0xFFF, data at the next page after text,
+// which is how a reader turns them into file offsets (MyStdLib
+// format/mbin.mln). 0 when the image has no collected sections.
 const uint32_t MBIN_MAGIC = 0x4D42494E; // 'MBIN'
 const uint32_t MBIN_VERSION_1 = 1;
+const uint32_t MBIN_VERSION_2 = 2;
 
 struct MbinHeader {
-    uint32_t magic;         // 0x4D42494E ("MBIN")
-    uint32_t version;       // 1
-    uint32_t entry_point;   // Initial PC (virtual address)
-    uint32_t text_offset;   // File offset to .text (32 bytes)
-    uint32_t text_size;     // Size of .text in bytes
-    uint32_t data_offset;   // File offset to .data (32 + text_size)
-    uint32_t data_size;     // Size of .data in bytes
-    uint32_t bss_size;      // Size of .bss in bytes (0 for now)
+    uint32_t magic;           // 0x4D42494E ("MBIN")
+    uint32_t version;         // 2
+    uint32_t entry_point;     // Initial PC (virtual address)
+    uint32_t text_offset;     // File offset to .text (sizeof(MbinHeader) = 36)
+    uint32_t text_size;       // Size of .text in bytes
+    uint32_t data_offset;     // File offset to .data (text_offset + text_size)
+    uint32_t data_size;       // Size of .data in bytes, collected sections and directory included
+    uint32_t bss_size;        // Size of .bss in bytes (0 for now)
+    uint32_t sections_offset; // File offset of the section directory (__sections), 0 if none
 };
 
 #pragma pack(pop)

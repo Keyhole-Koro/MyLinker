@@ -537,14 +537,24 @@ bool write_output(const std::string& output_path,
     }
 
     if (emit_header) {
+        // The directory follows every object's data and every collected
+        // chunk; its file offset is what a reader on disk needs.
+        uint32_t plain_data = 0;
+        for (const auto& obj : objects) plain_data += static_cast<uint32_t>(obj.data_section.size());
+        uint32_t chunk_bytes = 0;
+        for (const auto& sec : collected_sections) chunk_bytes += sec.size;
+        uint32_t sections_offset = collected_sections.empty()
+            ? 0u
+            : static_cast<uint32_t>(sizeof(MbinHeader)) + total_text_size + plain_data + chunk_bytes;
         write_be32(outfile, MBIN_MAGIC);
-        write_be32(outfile, MBIN_VERSION_1);
+        write_be32(outfile, MBIN_VERSION_2);
         write_be32(outfile, entry_point);
-        write_be32(outfile, sizeof(MbinHeader)); // text_offset = 32
+        write_be32(outfile, sizeof(MbinHeader)); // text_offset = 36
         write_be32(outfile, total_text_size);
         write_be32(outfile, sizeof(MbinHeader) + total_text_size); // data_offset
         write_be32(outfile, total_data_size);
         write_be32(outfile, 0); // bss_size
+        write_be32(outfile, sections_offset);
     }
 
     // Write all Text sections
@@ -580,7 +590,7 @@ bool write_output(const std::string& output_path,
 
     std::cout << "Successfully created " << output_path << std::endl;
     if (emit_header) {
-        std::cout << "Header: MBIN v2 (32 bytes), Entry: 0x" << std::hex << entry_point << std::dec << std::endl;
+        std::cout << "Header: MBIN (version 2, 36 bytes), Entry: 0x" << std::hex << entry_point << std::dec << std::endl;
     }
     std::cout << "Text Size: " << total_text_size << " bytes" << std::endl;
     std::cout << "Data Size: " << total_data_size << " bytes" << std::endl;
