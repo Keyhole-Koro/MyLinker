@@ -378,9 +378,11 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
             }
 
             uint32_t target_addr = global_symbol_table.at(sym_name);
-            uint32_t patch_offset = reloc.offset; // Offset within this file's TEXT section or blob
+            uint32_t patch_offset = reloc.offset; // Offset within this file's TEXT section, data or blob
             bool in_blob = reloc.section == SECTION_COLLECT;
-            std::vector<uint8_t>& section_bytes = in_blob ? obj.collect_blob : obj.text_section;
+            bool in_data = reloc.section == SECTION_DATA;
+            std::vector<uint8_t>& section_bytes = in_blob ? obj.collect_blob
+                                                 : (in_data ? obj.data_section : obj.text_section);
 
             // Check bounds
             if (patch_offset + 4 > section_bytes.size()) {
@@ -392,8 +394,8 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
             // Calculate value to write
             uint32_t value_to_write = 0;
             uint32_t instruction_addr = obj.text_base_addr + patch_offset;
-            if (in_blob && reloc.type != RELOC_WORD32) {
-                std::cerr << "Error: only .word relocations are allowed in a collected section ("
+            if ((in_blob || in_data) && reloc.type != RELOC_WORD32) {
+                std::cerr << "Error: only .word relocations are allowed in a data or collected section ("
                           << obj.filename << ")" << std::endl;
                 return false;
             }

@@ -54,7 +54,7 @@ struct RelocEntry {
     uint32_t offset;      // Offset in the section to patch
     char symbol_name[64]; // Name of the symbol to resolve
     uint32_t type;        // 0=ABSOLUTE (21-bit MOVI immediate), 1=RELATIVE (26-bit jump), 2=WORD32 (.word symbol)
-    uint32_t section;     // 0=TEXT, 2=COLLECT (a .word inside a chunk; WORD32 only)
+    uint32_t section;     // 0=TEXT, 1=DATA, 2=COLLECT (a .word inside data or a chunk; WORD32 only)
 };
 ```
 
