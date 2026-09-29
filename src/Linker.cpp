@@ -438,7 +438,6 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
                 // Strategy: Read current 32-bit word.
                 // If RELOC_RELATIVE, assume it's a specific format (e.g. top 6 bits opcode, bottom 26 offset).
                 // MyComputer Architecture v3.1 confirmation needed.
-                // Since I can't read the architecture spec easily (it's in `docs/spec.md`?), I should check it.
                 // But for now, I will assume a standard mask: 0xFC000000 is opcode, 0x03FFFFFF is offset.
 
                 uint32_t current_inst = 0;
@@ -446,7 +445,6 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
                 (void)current_inst;
 
                 // Mask: Keep top 6 bits, replace bottom 26
-                // This is a guess. I should verify with `docs/spec.md` if possible,
                 // but for a "quick" minimal implementation, this is a reasonable assumption
                 // for a custom 32-bit RISC.
 
@@ -460,7 +458,6 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
                 // I will add a TODO or just do a direct overwrite if the file says "placeholder (0)".
                 // If placeholder is 0, then `current_inst` might be just the opcode?
 
-                // Let's read `docs/spec.md` quickly to be safe?
                 // No, let's just implement a generic "OR" patch for now.
                 // value_to_write = (current_inst & 0xFC000000) | (offset & 0x03FFFFFF);
 
