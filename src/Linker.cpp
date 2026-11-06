@@ -597,13 +597,36 @@ bool write_output(const std::string& output_path,
     return true;
 }
 
+// The symbols a map lists. The relocation table holds only what something
+// referenced, but a reader needs a name for every function: one left out would
+// be charged to whichever symbol comes before it. Block labels stay out unless
+// they were referenced, because the assembler tags them `name-[module:n]` and
+// they would split a function into pieces.
+std::map<std::string, uint32_t> collect_map_symbols(
+        const std::vector<LoadedObject>& objects,
+        const std::map<std::string, uint32_t>& global_symbol_table) {
+    std::map<std::string, uint32_t> symbols = global_symbol_table;
+    for (const auto& obj : objects) {
+        for (const auto& sym : obj.symbols) {
+            if (sym.type != SYMBOL_DEFINED) continue;
+            if (std::strstr(sym.name, "-[") != nullptr) continue;
+            if (sym.section == SECTION_TEXT) {
+                symbols.emplace(sym.name, obj.text_base_addr + sym.offset);
+            } else if (sym.section == SECTION_DATA) {
+                symbols.emplace(sym.name, obj.data_base_addr + sym.offset);
+            }
+        }
+    }
+    return symbols;
+}
+
 // Emit a symbol map so downstream tools (e.g. the emulator profiler) can turn a
 // program counter into a function name. One line per symbol, sorted by address:
 //   0x00000040 kernel_main
 // A leading comment records the text/data split so a reader knows where code
-// ends. Only symbols that survived linking (referenced ones plus `_end`) appear.
+// ends. `symbols` comes from collect_map_symbols.
 bool write_map(const std::string& map_path,
-               const std::map<std::string, uint32_t>& global_symbol_table,
+               const std::map<std::string, uint32_t>& symbols,
                uint32_t base_addr,
                uint32_t total_text_size,
                uint32_t total_data_size,
@@ -627,8 +650,8 @@ bool write_map(const std::string& map_path,
     // Sort by address so the map reads like a memory layout and so the profiler
     // can binary-search / range-scan it to attribute a PC to the nearest symbol.
     std::vector<std::pair<uint32_t, std::string>> ordered;
-    ordered.reserve(global_symbol_table.size());
-    for (const auto& entry : global_symbol_table) {
+    ordered.reserve(symbols.size());
+    for (const auto& entry : symbols) {
         ordered.emplace_back(entry.second, entry.first);
     }
     std::sort(ordered.begin(), ordered.end());
@@ -702,7 +725,7 @@ bool link_objects(const std::vector<std::string>& input_files,
 
     // Optional Pass 4: emit the symbol map for the profiler / debuggers.
     if (!map_path.empty()) {
-        if (!write_map(map_path, global_symbol_table, base_addr, total_text_size, total_data_size, emit_header)) {
+        if (!write_map(map_path, collect_map_symbols(objects, global_symbol_table), base_addr, total_text_size, total_data_size, emit_header)) {
             return false;
         }
     }

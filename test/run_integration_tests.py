@@ -37,6 +37,11 @@ TESTS = [
     ("test_collect_dir", ["test_collect_A.json", "test_collect_B.json"], True, [], (36, 0x00000014)),
 ]
 
+# `helper` is a function nothing references, so it is not in the relocation
+# table; the map must still name it. `b_loop-[a:1]` is a block label and stays
+# out, or it would split `helper` in two for a reader of the map.
+MAP_TEST = ("test_map", ["test_map_A.json"], ["0x00000000 __START__", "0x00000004 helper"], ["b_loop"])
+
 
 def colored(text, color_code):
     return f"\033[{color_code}m{text}\033[0m"
@@ -95,6 +100,24 @@ if __name__ == "__main__":
                     failed += 1
                     continue
             status_line("PASS", f"{name} linked successfully", "32")
+            passed += 1
+
+        name, json_inputs, wanted, unwanted = MAP_TEST
+        obj_files = []
+        for json_file in json_inputs:
+            output_obj = temp_root / json_file.replace(".json", ".obj")
+            run(["python3", str(OBJ_GEN), str(TEST_DIR / json_file), str(output_obj)])
+            obj_files.append(str(output_obj))
+        map_path = temp_root / f"{name}.map"
+        run([str(LINKER_EXE), "--map", str(map_path), str(temp_root / f"{name}.bin")] + obj_files)
+        lines = map_path.read_text().splitlines()
+        missing = [line for line in wanted if line not in lines]
+        leaked = [line for line in lines for label in unwanted if label in line]
+        if missing or leaked:
+            status_line("FAIL", f"{name} missing {missing}, unexpected {leaked}", "31")
+            failed += 1
+        else:
+            status_line("PASS", f"{name} names unreferenced functions only", "32")
             passed += 1
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

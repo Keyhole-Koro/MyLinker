@@ -1,0 +1,10 @@
+{
+    "text": [1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0],
+    "data": [],
+    "symbols": [
+        {"name": "__START__", "type": 1, "section": 0, "offset": 0},
+        {"name": "helper", "type": 1, "section": 0, "offset": 4},
+        {"name": "b_loop-[a:1]", "type": 1, "section": 0, "offset": 8}
+    ],
+    "relocs": []
+}
