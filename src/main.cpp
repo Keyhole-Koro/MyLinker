@@ -9,6 +9,7 @@ int main(int argc, char* argv[]) {
     // remaining args keep their historic positional meaning:
     //   mllinker <output.bin> <input1.obj> [input2.obj ...]
     std::string map_path;
+    std::string lines_path;
     uint32_t base_addr = 0;
     bool emit_header = false;
     std::vector<LinkRedirect> redirects;
@@ -21,6 +22,12 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             map_path = argv[++i];
+        } else if (arg == "--lines") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --lines requires a file path" << std::endl;
+                return 1;
+            }
+            lines_path = argv[++i];
         } else if (arg == "--base") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --base requires an address" << std::endl;
@@ -48,7 +55,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (args.size() < 2) {
-        std::cout << "Usage: mllinker [--map <file>] [--base <hex_addr>] [--header]"
+        std::cout << "Usage: mllinker [--map <file>] [--lines <file>] [--base <hex_addr>] [--header]"
                   << " [--redirect <original>=<entry>] <output.bin> <input1.obj> [input2.obj ...]"
                   << std::endl;
         return 1;
@@ -57,7 +64,7 @@ int main(int argc, char* argv[]) {
     std::string output_path = args[0];
     std::vector<std::string> input_files(args.begin() + 1, args.end());
 
-    if (!link_objects(input_files, output_path, map_path, base_addr, emit_header, redirects)) {
+    if (!link_objects(input_files, output_path, map_path, lines_path, base_addr, emit_header, redirects)) {
         return 1;
     }
 

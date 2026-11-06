@@ -107,6 +107,23 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
                   obj.header.collect_count * sizeof(CollectEntry));
     }
 
+    // Read the debug trailer, which an object may not have
+    DebugHeader debug = {};
+    if (file.read(reinterpret_cast<char*>(&debug), sizeof(debug)) && debug.magic == DEBUG_MAGIC) {
+        obj.debug_strings.resize(debug.string_size);
+        file.read(obj.debug_strings.data(), debug.string_size);
+        obj.debug_funcs.resize(debug.func_count);
+        file.read(reinterpret_cast<char*>(obj.debug_funcs.data()),
+                  debug.func_count * sizeof(DebugFunc));
+        obj.debug_rows.resize(debug.row_count);
+        file.read(reinterpret_cast<char*>(obj.debug_rows.data()),
+                  debug.row_count * sizeof(DebugRow));
+        if (!file) {
+            std::cerr << "Error: Truncated debug trailer in " << path << std::endl;
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -667,11 +684,70 @@ bool write_map(const std::string& map_path,
     return true;
 }
 
+// Emit the line table: what the compiler said about each address, in address
+// order. A `line` row covers the code up to the next row; a `-` in its last
+// column means the code has no cost kind.
+//   file 0 src/main.mln
+//   func 0x00000040 0 main
+//   line 0x00000040 0 12 -
+bool write_lines(const std::string& lines_path, const std::vector<LoadedObject>& objects) {
+    std::ofstream out(lines_path);
+    if (!out) {
+        std::cerr << "Error: Could not open line table " << lines_path << std::endl;
+        return false;
+    }
+
+    std::map<std::string, uint32_t> files;
+    std::vector<std::string> file_order;
+    auto file_id = [&](const std::string& path) {
+        auto [entry, added] = files.emplace(path, static_cast<uint32_t>(file_order.size()));
+        if (added) file_order.push_back(path);
+        return entry->second;
+    };
+
+    struct Func { uint32_t addr; uint32_t file; std::string name; };
+    struct Row { uint32_t addr; uint32_t file; uint32_t line; std::string cost; };
+    std::vector<Func> funcs;
+    std::vector<Row> rows;
+    for (const auto& obj : objects) {
+        const char* strings = obj.debug_strings.c_str();
+        for (const auto& func : obj.debug_funcs) {
+            funcs.push_back({obj.text_base_addr + func.offset, file_id(strings + func.file),
+                             strings + func.name});
+        }
+        for (const auto& row : obj.debug_rows) {
+            rows.push_back({obj.text_base_addr + row.offset, file_id(strings + row.file),
+                            row.line, strings + row.cost});
+        }
+    }
+    std::stable_sort(funcs.begin(), funcs.end(),
+                     [](const Func& a, const Func& b) { return a.addr < b.addr; });
+    std::stable_sort(rows.begin(), rows.end(),
+                     [](const Row& a, const Row& b) { return a.addr < b.addr; });
+
+    char addr[16];
+    out << "# MyLinker line table\n";
+    for (size_t i = 0; i < file_order.size(); ++i) {
+        out << "file " << i << ' ' << file_order[i] << '\n';
+    }
+    for (const auto& func : funcs) {
+        std::snprintf(addr, sizeof(addr), "0x%08X", func.addr);
+        out << "func " << addr << ' ' << func.file << ' ' << func.name << '\n';
+    }
+    for (const auto& row : rows) {
+        std::snprintf(addr, sizeof(addr), "0x%08X", row.addr);
+        out << "line " << addr << ' ' << row.file << ' ' << row.line << ' '
+            << (row.cost.empty() ? "-" : row.cost) << '\n';
+    }
+    return true;
+}
+
 }  // namespace
 
 bool link_objects(const std::vector<std::string>& input_files,
                   const std::string& output_path,
                   const std::string& map_path,
+                  const std::string& lines_path,
                   uint32_t base_addr,
                   bool emit_header,
                   const std::vector<LinkRedirect>& redirects) {
@@ -728,6 +804,10 @@ bool link_objects(const std::vector<std::string>& input_files,
         if (!write_map(map_path, collect_map_symbols(objects, global_symbol_table), base_addr, total_text_size, total_data_size, emit_header)) {
             return false;
         }
+    }
+
+    if (!lines_path.empty() && !write_lines(lines_path, objects)) {
+        return false;
     }
 
     return true;

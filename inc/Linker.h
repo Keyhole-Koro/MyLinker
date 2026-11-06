@@ -18,6 +18,9 @@ struct LoadedObject {
     std::vector<CollectEntry> collects;
     std::vector<uint8_t> collect_blob;      // bytes of every chunk, at CollectEntry offsets
     std::vector<uint32_t> chunk_base_addr;  // final address of each chunk (parallel to collects)
+    std::string debug_strings;              // debug trailer, when the object has one
+    std::vector<DebugFunc> debug_funcs;
+    std::vector<DebugRow> debug_rows;
 
     // Calculated during Pass 1
     uint32_t text_base_addr;
@@ -35,9 +38,12 @@ struct LinkRedirect {
 // Link the given object files into output_path. When map_path is non-empty,
 // also write a symbol map (one "0xADDR NAME" line per resolved symbol, sorted
 // by address) that tools like the profiler use to translate PCs into names.
+// When lines_path is non-empty, also write the line table built from the
+// objects' debug trailers (ObjectFormat.h).
 bool link_objects(const std::vector<std::string>& input_files,
                   const std::string& output_path,
                   const std::string& map_path,
+                  const std::string& lines_path,
                   uint32_t base_addr,
                   bool emit_header = false,
                   const std::vector<LinkRedirect>& redirects = {});

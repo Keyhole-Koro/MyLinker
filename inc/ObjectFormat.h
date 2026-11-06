@@ -68,6 +68,39 @@ struct CollectEntry {
     uint32_t size;        // Chunk size in bytes
 };
 
+// Optional debug trailer, after the collected-section chunks: source
+// positions for tools that read addresses. It holds no bytes of the program,
+// so an object without one links to the same image, and a reader that stops
+// at the chunks never sees it. The strings come first; `name`, `file` and
+// `cost` are offsets into them, and a row's `cost` is 0 outside a cost region
+// (the pool starts with an empty string).
+//   DebugHeader, char strings[string_size],
+//   DebugFunc funcs[func_count], DebugRow rows[row_count]
+const uint32_t DEBUG_MAGIC = 0x4D444247; // 'MDBG'
+
+struct DebugHeader {
+    uint32_t magic;
+    uint32_t string_size;
+    uint32_t func_count;
+    uint32_t row_count;
+};
+
+// A function starts at `offset` in the object's text. `name` is the name
+// written in the source; the symbol may be mangled or private.
+struct DebugFunc {
+    uint32_t offset;
+    uint32_t name;
+    uint32_t file;
+};
+
+// The code from `offset` up to the next row came from `file`:`line`.
+struct DebugRow {
+    uint32_t offset;
+    uint32_t file;
+    uint32_t line;
+    uint32_t cost;
+};
+
 // MBIN executable header (docs/design/mbin-executable-header.md).
 // Header version 2 adds `sections_offset`: where in the file the section
 // directory lies -- the same `[name, start, size]` rows and name strings
