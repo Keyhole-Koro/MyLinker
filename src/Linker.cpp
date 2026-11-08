@@ -12,23 +12,11 @@
 
 namespace {
 
-// Generic instantiations are emitted into every object that uses them, the way
-// C++ templates are. MyLangCompiler mangles the template and its type
-// arguments into the name (`__mlg_f_7_rb_push_p0_r0_m0_n3_i32`), so two
-// definitions sharing a name are the same function and the first one can stand
-// for all of them. The prefix is compiler-owned: MyLangCompiler rejects any
-// user declaration that starts with it.
-//
-// This is the symbol half of what C++ gets from a COMDAT group. The duplicate's
-// bytes stay in the image, because the object format carries one text section
-// per object and offers no way to drop a single function's range -- only the
-// reference is deduplicated. Dropping the code too would need per-function
-// sections and a group signature in the object format.
-// Collected sections, laid out during layout_and_define_symbols and written
-// after the data sections (see ObjectFormat.h, CollectEntry): every chunk of
-// one name contiguously in link order, then the section directory
-// (`__sections`): one `[name, start, size]` row per section and a zero row,
-// followed by the name strings. `__section_<name>` is a section's start and
+// A collected section, laid out after the data sections (see ObjectFormat.h,
+// CollectEntry): every chunk of one name contiguously in link order. The
+// section directory (`__sections`) follows the last one: one
+// `[name, start, size]` row per section and a zero row, followed by the name
+// strings. `__section_<name>` is a section's start and
 // `__section_<name>_size` the address of its row's size word, so a reader
 // can either name a section statically or look it up by string at runtime.
 struct CollectedSection {
@@ -37,8 +25,17 @@ struct CollectedSection {
     uint32_t size;                                // bytes, all chunks
     std::vector<std::pair<size_t, size_t>> chunks; // (object index, CollectEntry index) in link order
 };
-static std::vector<CollectedSection> collected_sections;
-static std::vector<uint8_t> collect_index;        // the directory, after the chunks
+
+// Where the link puts everything: worked out by layout_and_define_symbols,
+// written out by write_output and described by write_map.
+struct Layout {
+    uint32_t text_base = 0;
+    uint32_t text_size = 0;                 // every live object's text
+    uint32_t data_base = 0;                 // see data_base_address
+    uint32_t data_size = 0;                 // their data, then the collected sections and directory
+    std::vector<CollectedSection> sections; // after the data, in order of first appearance
+    std::vector<uint8_t> directory;         // `__sections`, after the last section
+};
 
 // Words in the image are big-endian, as the machine reads them.
 uint32_t read_be32(const uint8_t* p) {
@@ -58,6 +55,18 @@ void append_be32(std::vector<uint8_t>& out, uint32_t v) {
     write_be32(&out[out.size() - 4], v);
 }
 
+// Generic instantiations are emitted into every object that uses them, the way
+// C++ templates are. MyLangCompiler mangles the template and its type
+// arguments into the name (`__mlg_f_7_rb_push_p0_r0_m0_n3_i32`), so two
+// definitions sharing a name are the same function and the first one can stand
+// for all of them. The prefix is compiler-owned: MyLangCompiler rejects any
+// user declaration that starts with it.
+//
+// This is the symbol half of what C++ gets from a COMDAT group. The duplicate's
+// bytes stay in the image, because the object format carries one text section
+// per object and offers no way to drop a single function's range -- only the
+// reference is deduplicated. Dropping the code too would need per-function
+// sections and a group signature in the object format.
 static bool is_mergeable_instantiation(const char* name) {
     static const char kPrefix[] = "__mlg_";
     return std::strncmp(name, kPrefix, sizeof(kPrefix) - 1) == 0;
@@ -143,13 +152,12 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
     return true;
 }
 
-bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
-                               std::map<std::string, uint32_t>& global_symbol_table,
-                               uint32_t& total_text_size,
-                               uint32_t& total_data_size,
-                               uint32_t base_addr,
-                               bool emit_header,
-                               const std::vector<LinkRedirect>& redirects) {
+// Drop from `objects` every object the link does not need, and return the
+// names it needs: __START__, the redirect entries, and every name a live
+// object's relocations refer to. An object is live when it defines a needed
+// name or contributes to a collected section.
+std::set<std::string> keep_live_objects(std::vector<LoadedObject>& objects,
+                                        const std::vector<LinkRedirect>& redirects) {
     std::set<std::string> needed_symbols;
     needed_symbols.insert("__START__");
     for (const auto& redirect : redirects) {
@@ -165,47 +173,31 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
     for (size_t i = 0; i < objects.size(); ++i) {
         if (!objects[i].collects.empty()) object_active[i] = true;
     }
-    bool changed = true;
 
-    // Dependency Resolution Loop
+    // Until nothing changes, activate the objects that define a needed name,
+    // then need what the active objects' relocations refer to. Only that: the
+    // rest of an active object's definitions do not become needed.
+    bool changed = true;
     while (changed) {
         changed = false;
-        
-        // Pass 1: Activate objects that provide needed symbols
         for (size_t i = 0; i < objects.size(); ++i) {
-            if (object_active[i]) continue; // Already active
-
+            if (object_active[i]) continue;
             for (const auto& sym : objects[i].symbols) {
-                if (sym.type == SYMBOL_DEFINED) {
-                    if (needed_symbols.count(sym.name)) {
-                        object_active[i] = true;
-                        changed = true;
-                        break; // Object is active, move to next object
-                    }
+                if (sym.type == SYMBOL_DEFINED && needed_symbols.count(sym.name)) {
+                    object_active[i] = true;
+                    changed = true;
+                    break;
                 }
             }
         }
-
-        // Pass 2: Collect new needs from active objects
         for (size_t i = 0; i < objects.size(); ++i) {
             if (!object_active[i]) continue;
-
-            // Add all Defined symbols from this active object to 'needed' if they are used? 
-            // No, only add relocations.
-            // BUT, if an object is active, we might want to expose its symbols?
-            // The requirement "Scope is not narrowed down" implies we should ONLY expose needed symbols.
-            // So we don't blindly add all definitions to 'needed'.
-            
             for (const auto& reloc : objects[i].relocs) {
-                if (needed_symbols.find(reloc.symbol_name) == needed_symbols.end()) {
-                    needed_symbols.insert(reloc.symbol_name);
-                    changed = true;
-                }
+                if (needed_symbols.insert(reloc.symbol_name).second) changed = true;
             }
         }
     }
 
-    // Filter objects to keep only active ones
     std::vector<LoadedObject> active_objects;
     for (size_t i = 0; i < objects.size(); ++i) {
         if (object_active[i]) {
@@ -213,150 +205,169 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
         }
     }
     objects = std::move(active_objects);
+    return needed_symbols;
+}
 
-    // Layout and Symbol Definition
-    uint32_t current_text_addr = base_addr;
-    total_text_size = 0;
-    total_data_size = 0;
+// The data follows the text, on the next 4 KiB page in an MBIN image
+// (emit_header) so that text and data reside on separate pages with
+// distinct MMU protections (RX vs RW).
+uint32_t data_base_address(uint32_t text_base, uint32_t text_size, bool emit_header) {
+    uint32_t text_end = text_base + text_size;
+    return emit_header ? ((text_end + 4095u) & ~4095u) : text_end;
+}
 
+// Every live object's text in link order from `base_addr`, and their data
+// likewise from the data base.
+void lay_out_objects(std::vector<LoadedObject>& objects, uint32_t base_addr, bool emit_header,
+                     Layout& layout) {
+    layout.text_base = base_addr;
     for (const auto& obj : objects) {
-        total_text_size += obj.header.text_size;
-        total_data_size += obj.header.data_size;
+        layout.text_size += obj.header.text_size;
+        layout.data_size += obj.header.data_size;
     }
+    layout.data_base = data_base_address(layout.text_base, layout.text_size, emit_header);
 
-    // If emit_header is requested, page-align the data section to 4 KiB so that
-    // text and data reside on separate pages with distinct MMU protections (RX vs RW).
-    uint32_t current_data_addr = emit_header ? ((base_addr + total_text_size + 4095u) & ~4095u)
-                                             : (base_addr + total_text_size);
-
-    // Pre-pass: text and data bases, then the collected sections after all
-    // data -- each name's chunks contiguous in link order -- so a symbol
-    // inside a chunk can be given its final address below.
-    {
-        uint32_t text_at = current_text_addr;
-        uint32_t data_at = current_data_addr;
-        for (auto& obj : objects) {
-            obj.text_base_addr = text_at;
-            obj.data_base_addr = data_at;
-            text_at += obj.header.text_size;
-            data_at += obj.header.data_size;
-        }
-        collected_sections.clear();
-        collect_index.clear();
-        for (size_t oi = 0; oi < objects.size(); ++oi) {
-            objects[oi].chunk_base_addr.assign(objects[oi].collects.size(), 0);
-            for (size_t ci = 0; ci < objects[oi].collects.size(); ++ci) {
-                std::string name(objects[oi].collects[ci].name);
-                CollectedSection* sec = nullptr;
-                for (auto& s : collected_sections) if (s.name == name) sec = &s;
-                if (!sec) { collected_sections.push_back({name, 0, 0, {}}); sec = &collected_sections.back(); }
-                sec->chunks.push_back({oi, ci});
-            }
-        }
-        uint32_t at = data_at;
-        for (auto& sec : collected_sections) {
-            sec.start = at;
-            for (const auto& ref : sec.chunks) {
-                objects[ref.first].chunk_base_addr[ref.second] = at;
-                at += objects[ref.first].collects[ref.second].size;
-            }
-            sec.size = at - sec.start;
-        }
-        // The directory, after every chunk: rows first, then the names they
-        // point at. Always present (a lone zero row when nothing was
-        // collected) so `__sections` can be imported unconditionally.
-        const uint32_t row_bytes = 12;
-        uint32_t names_at = at + static_cast<uint32_t>((collected_sections.size() + 1) * row_bytes);
-        std::vector<uint8_t> names;
-        for (size_t i = 0; i < collected_sections.size(); ++i) {
-            const auto& sec = collected_sections[i];
-            append_be32(collect_index, names_at + static_cast<uint32_t>(names.size()));
-            append_be32(collect_index, sec.start);
-            append_be32(collect_index, sec.size);
-            names.insert(names.end(), sec.name.begin(), sec.name.end());
-            names.push_back(0);
-            while (names.size() % 4 != 0) names.push_back(0);
-            global_symbol_table["__section_" + sec.name] = sec.start;
-            global_symbol_table["__section_" + sec.name + "_size"] = at + static_cast<uint32_t>(i * row_bytes) + 8;
-        }
-        append_be32(collect_index, 0);
-        append_be32(collect_index, 0);
-        append_be32(collect_index, 0);
-        collect_index.insert(collect_index.end(), names.begin(), names.end());
-        global_symbol_table["__sections"] = at;
-        total_data_size += (at - data_at) + static_cast<uint32_t>(collect_index.size());
-    }
-
-    std::map<std::string, std::string> all_definitions; // name -> first defining object
+    uint32_t text_at = layout.text_base;
+    uint32_t data_at = layout.data_base;
     for (auto& obj : objects) {
-        obj.text_base_addr = current_text_addr;
-        obj.data_base_addr = current_data_addr;
+        obj.text_base_addr = text_at;
+        obj.data_base_addr = data_at;
+        text_at += obj.header.text_size;
+        data_at += obj.header.data_size;
+    }
+}
 
-        current_text_addr += obj.header.text_size;
-        current_data_addr += obj.header.data_size;
+// The collected sections after all data -- each name's chunks contiguous in
+// link order, giving every chunk its address -- then the directory. Defines
+// `__section_<name>`, `__section_<name>_size` and `__sections`.
+void lay_out_collected_sections(std::vector<LoadedObject>& objects, Layout& layout,
+                                std::map<std::string, uint32_t>& global_symbol_table) {
+    for (size_t oi = 0; oi < objects.size(); ++oi) {
+        objects[oi].chunk_base_addr.assign(objects[oi].collects.size(), 0);
+        for (size_t ci = 0; ci < objects[oi].collects.size(); ++ci) {
+            std::string name(objects[oi].collects[ci].name);
+            CollectedSection* sec = nullptr;
+            for (auto& s : layout.sections) if (s.name == name) sec = &s;
+            if (!sec) { layout.sections.push_back({name, 0, 0, {}}); sec = &layout.sections.back(); }
+            sec->chunks.push_back({oi, ci});
+        }
+    }
+    const uint32_t data_end = layout.data_base + layout.data_size;
+    uint32_t at = data_end;
+    for (auto& sec : layout.sections) {
+        sec.start = at;
+        for (const auto& ref : sec.chunks) {
+            objects[ref.first].chunk_base_addr[ref.second] = at;
+            at += objects[ref.first].collects[ref.second].size;
+        }
+        sec.size = at - sec.start;
+    }
+    // The directory, after every chunk: rows first, then the names they
+    // point at. Always present (a lone zero row when nothing was
+    // collected) so `__sections` can be imported unconditionally.
+    const uint32_t row_bytes = 12;
+    uint32_t names_at = at + static_cast<uint32_t>((layout.sections.size() + 1) * row_bytes);
+    std::vector<uint8_t> names;
+    for (size_t i = 0; i < layout.sections.size(); ++i) {
+        const auto& sec = layout.sections[i];
+        append_be32(layout.directory, names_at + static_cast<uint32_t>(names.size()));
+        append_be32(layout.directory, sec.start);
+        append_be32(layout.directory, sec.size);
+        names.insert(names.end(), sec.name.begin(), sec.name.end());
+        names.push_back(0);
+        while (names.size() % 4 != 0) names.push_back(0);
+        global_symbol_table["__section_" + sec.name] = sec.start;
+        global_symbol_table["__section_" + sec.name + "_size"] = at + static_cast<uint32_t>(i * row_bytes) + 8;
+    }
+    append_be32(layout.directory, 0);
+    append_be32(layout.directory, 0);
+    append_be32(layout.directory, 0);
+    layout.directory.insert(layout.directory.end(), names.begin(), names.end());
+    global_symbol_table["__sections"] = at;
+    layout.data_size += (at - data_end) + static_cast<uint32_t>(layout.directory.size());
+}
 
-        for (const auto& sym : obj.symbols) {
-            if (sym.type == SYMBOL_DEFINED) {
-                // Two objects defining the same name is an error whether or
-                // not anyone references it: a reference would silently bind
-                // to whichever came first. Private labels are excluded: the
-                // assembler tags them `name-[module:n]` with the file's stem,
-                // so two files with the same stem in different directories
-                // (TestKit's runtime/verdict.mln and platform/.../verdict.mln)
-                // repeat tags, and such labels are never referenced across
-                // objects anyway.
-                if (!is_mergeable_instantiation(sym.name) && !is_private_label(sym.name)) {
-                    auto seen = all_definitions.find(sym.name);
-                    if (seen != all_definitions.end()) {
-                        std::cerr << "Error: Duplicate symbol definition '" << sym.name
-                                  << "' in " << obj.filename << " (first defined in "
-                                  << seen->second << ")" << std::endl;
-                        return false;
-                    }
-                    all_definitions[sym.name] = obj.filename;
-                }
-                // Only register if needed (Narrow Scope)
-                if (needed_symbols.count(sym.name)) {
-                     uint32_t final_addr = 0;
-                    if (sym.section == SECTION_TEXT) {
-                        final_addr = obj.text_base_addr + sym.offset;
-                    } else if (sym.section == SECTION_DATA) {
-                        final_addr = obj.data_base_addr + sym.offset;
-                    } else if (sym.section == SECTION_COLLECT) {
-                        // Inside whichever chunk of the blob holds the offset.
-                        for (size_t ci = 0; ci < obj.collects.size(); ++ci) {
-                            const auto& ce = obj.collects[ci];
-                            if (sym.offset >= ce.offset && sym.offset < ce.offset + ce.size) {
-                                final_addr = obj.chunk_base_addr[ci] + (sym.offset - ce.offset);
-                                break;
-                            }
-                        }
-                    }
-
-                    if (global_symbol_table.count(sym.name)) {
-                        if (is_mergeable_instantiation(sym.name)) {
-                            // Already have an identical copy; keep the first.
-                            continue;
-                        }
-                        std::cerr << "Error: Duplicate symbol definition '" << sym.name << "'" << std::endl;
-                        return false;
-                    }
-                    global_symbol_table[sym.name] = final_addr;
-                }
+// The final address of a symbol `obj` defines, once the object and its
+// chunks are laid out. 0 for an offset in no chunk or an unknown section.
+uint32_t symbol_address(const LoadedObject& obj, const SymbolEntry& sym) {
+    if (sym.section == SECTION_TEXT) return obj.text_base_addr + sym.offset;
+    if (sym.section == SECTION_DATA) return obj.data_base_addr + sym.offset;
+    if (sym.section == SECTION_COLLECT) {
+        // Inside whichever chunk of the blob holds the offset.
+        for (size_t ci = 0; ci < obj.collects.size(); ++ci) {
+            const auto& ce = obj.collects[ci];
+            if (sym.offset >= ce.offset && sym.offset < ce.offset + ce.size) {
+                return obj.chunk_base_addr[ci] + (sym.offset - ce.offset);
             }
         }
     }
-    
-    // The collected sections were laid out in the pre-pass above and sit
-    // between the last data section and `_end`.
-    for (const auto& sec : collected_sections) current_data_addr += sec.size;
-    current_data_addr += static_cast<uint32_t>(collect_index.size());
+    return 0;
+}
+
+// Enter every needed symbol the live objects define in the table, and
+// reject a name two objects define.
+bool define_symbols(const std::vector<LoadedObject>& objects,
+                    const std::set<std::string>& needed_symbols,
+                    std::map<std::string, uint32_t>& global_symbol_table) {
+    std::map<std::string, std::string> all_definitions; // name -> first defining object
+    for (const auto& obj : objects) {
+        for (const auto& sym : obj.symbols) {
+            if (sym.type != SYMBOL_DEFINED) continue;
+            // Two objects defining the same name is an error whether or
+            // not anyone references it: a reference would silently bind
+            // to whichever came first. Private labels are excluded: the
+            // assembler tags them `name-[module:n]` with the file's stem,
+            // so two files with the same stem in different directories
+            // (TestKit's runtime/verdict.mln and platform/.../verdict.mln)
+            // repeat tags, and such labels are never referenced across
+            // objects anyway.
+            if (!is_mergeable_instantiation(sym.name) && !is_private_label(sym.name)) {
+                auto seen = all_definitions.find(sym.name);
+                if (seen != all_definitions.end()) {
+                    std::cerr << "Error: Duplicate symbol definition '" << sym.name
+                              << "' in " << obj.filename << " (first defined in "
+                              << seen->second << ")" << std::endl;
+                    return false;
+                }
+                all_definitions[sym.name] = obj.filename;
+            }
+            // Only a needed symbol goes in the table.
+            if (!needed_symbols.count(sym.name)) continue;
+            if (global_symbol_table.count(sym.name)) {
+                if (is_mergeable_instantiation(sym.name)) {
+                    // Already have an identical copy; keep the first.
+                    continue;
+                }
+                std::cerr << "Error: Duplicate symbol definition '" << sym.name << "'" << std::endl;
+                return false;
+            }
+            global_symbol_table[sym.name] = symbol_address(obj, sym);
+        }
+    }
+    return true;
+}
+
+// Pass 1: keep the objects the link needs, lay them out from `base_addr`,
+// and give every needed symbol its final address.
+bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
+                               std::map<std::string, uint32_t>& global_symbol_table,
+                               Layout& layout,
+                               uint32_t base_addr,
+                               bool emit_header,
+                               const std::vector<LinkRedirect>& redirects) {
+    std::set<std::string> needed_symbols = keep_live_objects(objects, redirects);
+    lay_out_objects(objects, base_addr, emit_header, layout);
+    // Before the symbols, so that one inside a chunk has its address.
+    lay_out_collected_sections(objects, layout, global_symbol_table);
+    if (!define_symbols(objects, needed_symbols, global_symbol_table)) {
+        return false;
+    }
 
     // Synthesize the `_end` symbol marking the end of the loaded image
-    // (text + data). The kernel heap allocator uses this as the start of its
-    // free region. current_data_addr has advanced past the last data section.
+    // (text + data, the collected sections and directory included). The
+    // kernel heap allocator uses this as the start of its free region.
     if (!global_symbol_table.count("_end")) {
-        global_symbol_table["_end"] = current_data_addr;
+        global_symbol_table["_end"] = layout.data_base + layout.data_size;
     }
 
     // verify all needed symbols are found
@@ -469,8 +480,7 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
 
 bool write_output(const std::string& output_path,
                   const std::vector<LoadedObject>& objects,
-                  uint32_t total_text_size,
-                  uint32_t total_data_size,
+                  const Layout& layout,
                   bool emit_header,
                   uint32_t entry_point) {
     std::ofstream outfile(output_path, std::ios::binary);
@@ -480,25 +490,25 @@ bool write_output(const std::string& output_path,
     }
 
     if (emit_header) {
+        const uint32_t header_size = static_cast<uint32_t>(sizeof(MbinHeader));
         // The directory follows every object's data and every collected
         // chunk; its file offset is what a reader on disk needs.
         uint32_t plain_data = 0;
         for (const auto& obj : objects) plain_data += static_cast<uint32_t>(obj.data_section.size());
         uint32_t chunk_bytes = 0;
-        for (const auto& sec : collected_sections) chunk_bytes += sec.size;
-        uint32_t sections_offset = collected_sections.empty()
+        for (const auto& sec : layout.sections) chunk_bytes += sec.size;
+        uint32_t sections_offset = layout.sections.empty()
             ? 0u
-            : static_cast<uint32_t>(sizeof(MbinHeader)) + total_text_size + plain_data + chunk_bytes;
-        const uint32_t header_size = static_cast<uint32_t>(sizeof(MbinHeader));
+            : header_size + layout.text_size + plain_data + chunk_bytes;
         const uint32_t fields[] = {
             MBIN_MAGIC,
             MBIN_VERSION_2,
             entry_point,
-            header_size,                   // text_offset = 36
-            total_text_size,
-            header_size + total_text_size, // data_offset
-            total_data_size,
-            0,                             // bss_size
+            header_size,                    // text_offset = 36
+            layout.text_size,
+            header_size + layout.text_size, // data_offset
+            layout.data_size,
+            0,                              // bss_size
             sections_offset,
         };
         static_assert(sizeof(fields) == sizeof(MbinHeader), "one word per MbinHeader field");
@@ -526,8 +536,8 @@ bool write_output(const std::string& output_path,
     }
 
     // Then the collected sections: each name's chunks contiguously, in the
-    // order layout_and_define_symbols assigned, then the size words.
-    for (const auto& sec : collected_sections) {
+    // order layout_and_define_symbols assigned, then the directory.
+    for (const auto& sec : layout.sections) {
         for (const auto& ref : sec.chunks) {
             const auto& obj = objects[ref.first];
             const auto& ce = obj.collects[ref.second];
@@ -536,16 +546,16 @@ bool write_output(const std::string& output_path,
             }
         }
     }
-    if (!collect_index.empty()) {
-        outfile.write(reinterpret_cast<const char*>(collect_index.data()), collect_index.size());
+    if (!layout.directory.empty()) {
+        outfile.write(reinterpret_cast<const char*>(layout.directory.data()), layout.directory.size());
     }
 
     std::cout << "Successfully created " << output_path << std::endl;
     if (emit_header) {
         std::cout << "Header: MBIN (version 2, 36 bytes), Entry: 0x" << std::hex << entry_point << std::dec << std::endl;
     }
-    std::cout << "Text Size: " << total_text_size << " bytes" << std::endl;
-    std::cout << "Data Size: " << total_data_size << " bytes" << std::endl;
+    std::cout << "Text Size: " << layout.text_size << " bytes" << std::endl;
+    std::cout << "Data Size: " << layout.data_size << " bytes" << std::endl;
 
     return true;
 }
@@ -563,10 +573,8 @@ std::map<std::string, uint32_t> collect_map_symbols(
         for (const auto& sym : obj.symbols) {
             if (sym.type != SYMBOL_DEFINED) continue;
             if (is_private_label(sym.name)) continue;
-            if (sym.section == SECTION_TEXT) {
-                symbols.emplace(sym.name, obj.text_base_addr + sym.offset);
-            } else if (sym.section == SECTION_DATA) {
-                symbols.emplace(sym.name, obj.data_base_addr + sym.offset);
+            if (sym.section == SECTION_TEXT || sym.section == SECTION_DATA) {
+                symbols.emplace(sym.name, symbol_address(obj, sym));
             }
         }
     }
@@ -580,25 +588,20 @@ std::map<std::string, uint32_t> collect_map_symbols(
 // ends. `symbols` comes from collect_map_symbols.
 bool write_map(const std::string& map_path,
                const std::map<std::string, uint32_t>& symbols,
-               uint32_t base_addr,
-               uint32_t total_text_size,
-               uint32_t total_data_size,
-               bool emit_header) {
+               const Layout& layout) {
     std::ofstream mapfile(map_path);
     if (!mapfile) {
         std::cerr << "Error: Could not open map file " << map_path << std::endl;
         return false;
     }
 
-    uint32_t data_base = emit_header ? ((base_addr + total_text_size + 4095u) & ~4095u)
-                                     : (base_addr + total_text_size);
-
     mapfile << "# MyLinker symbol map\n";
-    mapfile << "# text: 0x" << std::hex << base_addr << " .. 0x" << (base_addr + total_text_size) << std::dec
-            << " (" << total_text_size << " bytes)\n";
-    mapfile << "# data: 0x" << std::hex << data_base << " .. 0x"
-            << (data_base + total_data_size) << std::dec
-            << " (" << total_data_size << " bytes)\n";
+    mapfile << "# text: 0x" << std::hex << layout.text_base << " .. 0x"
+            << (layout.text_base + layout.text_size) << std::dec
+            << " (" << layout.text_size << " bytes)\n";
+    mapfile << "# data: 0x" << std::hex << layout.data_base << " .. 0x"
+            << (layout.data_base + layout.data_size) << std::dec
+            << " (" << layout.data_size << " bytes)\n";
 
     // Sort by address so the map reads like a memory layout and so the profiler
     // can binary-search / range-scan it to attribute a PC to the nearest symbol.
@@ -701,10 +704,9 @@ bool link_objects(const std::vector<std::string>& input_files,
 
     // Pass 1: Layout & Symbol Definition
     std::map<std::string, uint32_t> global_symbol_table;
-    uint32_t total_text_size = 0;
-    uint32_t total_data_size = 0;
-    if (!layout_and_define_symbols(objects, global_symbol_table, total_text_size, total_data_size,
-                                   base_addr, emit_header, redirects)) {
+    Layout layout;
+    if (!layout_and_define_symbols(objects, global_symbol_table, layout, base_addr, emit_header,
+                                   redirects)) {
         return false;
     }
 
@@ -731,13 +733,13 @@ bool link_objects(const std::vector<std::string>& input_files,
     }
 
     // Pass 3: Write Output
-    if (!write_output(output_path, objects, total_text_size, total_data_size, emit_header, entry_point)) {
+    if (!write_output(output_path, objects, layout, emit_header, entry_point)) {
         return false;
     }
 
     // Optional Pass 4: emit the symbol map for the profiler / debuggers.
     if (!map_path.empty()) {
-        if (!write_map(map_path, collect_map_symbols(objects, global_symbol_table), base_addr, total_text_size, total_data_size, emit_header)) {
+        if (!write_map(map_path, collect_map_symbols(objects, global_symbol_table), layout)) {
             return false;
         }
     }
