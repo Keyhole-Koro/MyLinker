@@ -451,7 +451,9 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
             bool in_data = reloc.section == SECTION_DATA;
             std::vector<uint8_t>& section_bytes = in_blob ? obj.collect_blob
                                                  : (in_data ? obj.data_section : obj.text_section);
-            if (patch_offset + 4 > section_bytes.size()) {
+            // Not `patch_offset + 4 > size`: in a malformed object an offset
+            // near 2^32 would wrap that sum around and pass.
+            if (section_bytes.size() < 4 || patch_offset > section_bytes.size() - 4) {
                 std::cerr << "Error: Relocation offset out of bounds in " << obj.filename
                           << std::endl;
                 return false;

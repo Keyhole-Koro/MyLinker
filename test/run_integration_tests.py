@@ -37,6 +37,18 @@ TESTS = [
     ("test_collect_dir", ["test_collect_A.json", "test_collect_B.json"], True, [], (36, 0x00000014)),
 ]
 
+# Malformed objects the linker must refuse with an error naming the object:
+# exit status 1, not a link and not a crash. (name, json inputs, message);
+# the error is the message, then the path of the last object, the malformed
+# one.
+REJECTED = [
+    # A relocation at offset 0xFFFFFFFC, in 8 bytes of text: offset + 4 wraps
+    # around to 0, which a check of that sum lets through to patch far
+    # outside the text.
+    ("test_reloc_offset_wraps", ["test_reloc_offset_wraps.json"],
+     "Error: Relocation offset out of bounds in"),
+]
+
 # `helper` is a function nothing references, so it is not in the relocation
 # table; the map must still name it. `b_loop-[a:1]` is a block label and stays
 # out, or it would split `helper` in two for a reader of the map.
@@ -109,6 +121,23 @@ if __name__ == "__main__":
                     continue
             status_line("PASS", f"{name} linked successfully", "32")
             passed += 1
+
+        for name, json_inputs, message in REJECTED:
+            obj_files = []
+            for json_file in json_inputs:
+                output_obj = temp_root / json_file.replace(".json", ".obj")
+                run(["python3", str(OBJ_GEN), str(TEST_DIR / json_file), str(output_obj)])
+                obj_files.append(str(output_obj))
+            result = subprocess.run([str(LINKER_EXE), str(temp_root / f"{name}.bin")] + obj_files,
+                                    capture_output=True, text=True)
+            expected = f"{message} {obj_files[-1]}"
+            if result.returncode != 1 or expected not in result.stderr:
+                status_line("FAIL", f"{name} expected exit 1 and '{expected}', got exit "
+                            f"{result.returncode}: {result.stderr.strip()}", "31")
+                failed += 1
+            else:
+                status_line("PASS", f"{name} rejected with its error", "32")
+                passed += 1
 
         name, json_inputs, wanted, unwanted = MAP_TEST
         obj_files = []
