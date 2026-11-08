@@ -399,6 +399,12 @@ const LinkRedirect* redirect_for(const std::vector<LinkRedirect>& redirects,
     return nullptr;
 }
 
+// Whether `type` is one of ObjectFormat.h's ObjRelocType, which patch_word
+// handles. An object with any other is malformed.
+bool known_reloc_type(uint32_t type) {
+    return type == RELOC_ABSOLUTE || type == RELOC_RELATIVE || type == RELOC_WORD32;
+}
+
 // The word a relocation leaves at address `pc`, from the word the assembler
 // left there and the symbol's final address. RELATIVE fills a call or jump's
 // low 26 bits with `target - pc`, the offset in bytes from the instruction
@@ -413,11 +419,8 @@ uint32_t patch_word(uint32_t type, uint32_t existing, uint32_t target, uint32_t 
         return (existing & 0xFC000000u) | ((target - pc) & 0x03FFFFFFu);
     case RELOC_ABSOLUTE:
         return (existing & 0xFFE00000u) | (target & 0x001FFFFFu);
-    default:
-        // No object carries another type; one has always been taken as an
-        // ABSOLUTE to address 0.
-        return existing & 0xFFE00000u;
     }
+    return existing; // not reached: apply_relocations rejects any other type
 }
 
 // Patch every relocation of the live objects with its symbol's final
@@ -428,6 +431,11 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
     for (auto& obj : objects) {
         for (const auto& reloc : obj.relocs) {
             std::string sym_name(reloc.symbol_name);
+            if (!known_reloc_type(reloc.type)) {
+                std::cerr << "Error: Unknown relocation type " << reloc.type << " for '"
+                          << sym_name << "' in " << obj.filename << std::endl;
+                return false;
+            }
 
             // Test interception changes only direct control-flow relocations.
             // Absolute references (for example taking a function address) keep

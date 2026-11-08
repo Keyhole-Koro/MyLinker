@@ -116,6 +116,7 @@ The linker will perform the following passes:
             jump's offset in bytes, counted from the instruction itself, as the assembler encodes
             a local jump)
         *   **WORD32:** `TargetAddress`, the whole word (`.word symbol`)
+        *   Any other type makes the object malformed: the link stops with an error naming it.
     *   Write the value into the corresponding "hole" in the binary buffer, keeping the opcode
         and register bits the assembler left around it.
 

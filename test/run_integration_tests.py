@@ -47,6 +47,11 @@ REJECTED = [
     # outside the text.
     ("test_reloc_offset_wraps", ["test_reloc_offset_wraps.json"],
      "Error: Relocation offset out of bounds in"),
+    # Relocation type 3 is none of ABSOLUTE, RELATIVE and WORD32. It used to
+    # be patched as an ABSOLUTE to address 0: `movi r1, target` linked as
+    # `movi r1, 0`.
+    ("test_unknown_reloc_type", ["test_unknown_reloc_type.json"],
+     "Error: Unknown relocation type 3 for 'target' in"),
 ]
 
 # `helper` is a function nothing references, so it is not in the relocation

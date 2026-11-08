@@ -1,0 +1,11 @@
+{
+    "text": [8, 32, 0, 0, 252, 0, 0, 0],
+    "data": [],
+    "symbols": [
+        { "name": "__START__", "type": 1, "section": 0, "offset": 0 },
+        { "name": "target", "type": 1, "section": 0, "offset": 4 }
+    ],
+    "relocs": [
+        { "offset": 0, "symbol_name": "target", "type": 3 }
+    ]
+}
