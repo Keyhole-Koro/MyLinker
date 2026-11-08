@@ -3,23 +3,35 @@
 
 #include <stdint.h>
 
-// Magic number: "LNK3" -> 0x4C4E4B33 (LNK1 + collected sections, see CollectEntry).
-// However, checking endianness might be important. Let's assume Little Endian for now as is common.
-const uint32_t LINKER_MAGIC = 0x4C4E4B33;
+// The constants are enumerators, not `const` variables, so that any C or C++
+// file can include this header: in C a file-scope const is a definition with
+// external linkage, and two C files defining it would not link together.
 
-// Section Types
-const uint32_t SECTION_TEXT = 0;
-const uint32_t SECTION_DATA = 1;
-const uint32_t SECTION_COLLECT = 2; // the object's collected-section blob (see CollectEntry)
+// "LNK3" (LNK1 + collected sections, see CollectEntry). The header and the
+// tables are written in the host's byte order, little-endian in practice; the
+// bytes of the text, data and collected sections are big-endian, as the
+// machine reads them.
+enum { LINKER_MAGIC = 0x4C4E4B33 };
 
-// Symbol Types
-const uint32_t SYMBOL_UNDEFINED = 0; // Import
-const uint32_t SYMBOL_DEFINED = 1;   // Export
+// SymbolEntry.section and RelocEntry.section
+enum ObjSection {
+    SECTION_TEXT = 0,
+    SECTION_DATA = 1,
+    SECTION_COLLECT = 2, // the object's collected-section blob (see CollectEntry)
+};
 
-// Relocation Types
-const uint32_t RELOC_ABSOLUTE = 0; // absolute address into a 21-bit immediate (MOVI rX, label)
-const uint32_t RELOC_RELATIVE = 1; // 26-bit relative jump (for CALL/B)
-const uint32_t RELOC_WORD32 = 2;   // absolute address written in full into a data word (.word symbol)
+// SymbolEntry.type
+enum ObjSymbolType {
+    SYMBOL_UNDEFINED = 0, // imported: another object defines it
+    SYMBOL_DEFINED = 1,   // defined here, at `offset` in `section`
+};
+
+// RelocEntry.type
+enum ObjRelocType {
+    RELOC_ABSOLUTE = 0, // absolute address into a 21-bit immediate (MOVI rX, label)
+    RELOC_RELATIVE = 1, // 26-bit pc-relative offset of a call or jump
+    RELOC_WORD32 = 2,   // absolute address written in full into a data word (.word symbol)
+};
 
 #pragma pack(push, 1)
 
@@ -33,18 +45,19 @@ struct FileHeader {
     uint32_t collect_size;    // bytes of the collected-section blob (after the data section)
 };
 
+// An undefined symbol has no section or offset of its own: both are 0.
 struct SymbolEntry {
     char name[64];
-    uint32_t type;    // 0=UNDEFINED, 1=DEFINED
-    uint32_t section; // 0=TEXT, 1=DATA
+    uint32_t type;    // ObjSymbolType: UNDEFINED or DEFINED
+    uint32_t section; // ObjSection: TEXT, DATA or COLLECT (an offset into the blob)
     uint32_t offset;  // Offset relative to section start
 };
 
 struct RelocEntry {
     uint32_t offset;      // Offset to patch, within `section`
     char symbol_name[64]; // Name of the symbol to resolve
-    uint32_t type;        // 0=ABSOLUTE, 1=RELATIVE, 2=WORD32
-    uint32_t section;     // 0=TEXT, 2=COLLECT (the blob)
+    uint32_t type;        // ObjRelocType: ABSOLUTE, RELATIVE or WORD32
+    uint32_t section;     // ObjSection: TEXT, DATA or COLLECT; only a WORD32 patches DATA or COLLECT
 };
 
 // A chunk of a named collected section (`.section name` in the assembly).
@@ -76,7 +89,7 @@ struct CollectEntry {
 // (the pool starts with an empty string).
 //   DebugHeader, char strings[string_size],
 //   DebugFunc funcs[func_count], DebugRow rows[row_count]
-const uint32_t DEBUG_MAGIC = 0x4D444247; // 'MDBG'
+enum { DEBUG_MAGIC = 0x4D444247 }; // 'MDBG'
 
 struct DebugHeader {
     uint32_t magic;
@@ -110,9 +123,11 @@ struct DebugRow {
 // text maps at entry_point & ~0xFFF, data at the next page after text,
 // which is how a reader turns them into file offsets (MyStdLib
 // format/mbin.mln). 0 when the image has no collected sections.
-const uint32_t MBIN_MAGIC = 0x4D42494E; // 'MBIN'
-const uint32_t MBIN_VERSION_1 = 1;
-const uint32_t MBIN_VERSION_2 = 2;
+enum {
+    MBIN_MAGIC = 0x4D42494E, // 'MBIN'
+    MBIN_VERSION_1 = 1,
+    MBIN_VERSION_2 = 2,
+};
 
 struct MbinHeader {
     uint32_t magic;           // 0x4D42494E ("MBIN")
