@@ -20,6 +20,7 @@ from objformat import (
     SYMBOL_ENTRY,
     SYMBOL_UNDEFINED,
     cstring,
+    read_debug_trailer,
 )
 
 SYMBOL_TYPES = {
@@ -107,6 +108,7 @@ def parse_obj(path: Path):
         "relocs": relocs,
         "collects": collects,
         "blob": blob,
+        "debug": read_debug_trailer(buf, off),
         "header": {
             "text_size": text_size,
             "data_size": data_size,
@@ -160,6 +162,14 @@ def dump_obj(path: Path, args):
             print(
                 f"  [{idx:02d}] offset=0x{r['offset']:x} type={rtype:<3} symbol={r['symbol_name']}"
             )
+    if obj["debug"]:
+        funcs, rows = obj["debug"]
+        print("\nDebug functions:")
+        for idx, (offset, name, file) in enumerate(funcs):
+            print(f"  [{idx:02d}] offset=0x{offset:x} {name} ({file})")
+        print("\nDebug rows:")
+        for idx, (offset, file, line, cost) in enumerate(rows):
+            print(f"  [{idx:02d}] offset=0x{offset:x} {file}:{line}" + (f" cost={cost}" if cost else ""))
     print()
 
 

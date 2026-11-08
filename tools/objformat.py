@@ -56,3 +56,32 @@ DEBUG_ROW = struct.Struct("<4I")
 def cstring(raw: bytes) -> str:
     """Decode a fixed-size, NUL-padded name field."""
     return raw.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+
+
+def read_debug_trailer(buf: bytes, off: int):
+    """The debug trailer at `off`, just after the collected-section table, or
+    None if the object has none. Returns (funcs, rows) with the strings looked
+    up: a func is (offset, name, file), a row (offset, file, line, cost), its
+    cost "" outside a cost region."""
+    if off + DEBUG_HEADER.size > len(buf):
+        return None
+    magic, string_size, func_count, row_count = DEBUG_HEADER.unpack_from(buf, off)
+    if magic != DEBUG_MAGIC:
+        return None
+    off += DEBUG_HEADER.size
+    end = off + string_size + func_count * DEBUG_FUNC.size + row_count * DEBUG_ROW.size
+    if end > len(buf):
+        raise ValueError("Truncated debug trailer")
+    strings = buf[off:off + string_size]
+    off += string_size
+    funcs = []
+    for _ in range(func_count):
+        offset, name, file = DEBUG_FUNC.unpack_from(buf, off)
+        funcs.append((offset, cstring(strings[name:]), cstring(strings[file:])))
+        off += DEBUG_FUNC.size
+    rows = []
+    for _ in range(row_count):
+        offset, file, line, cost = DEBUG_ROW.unpack_from(buf, off)
+        rows.append((offset, cstring(strings[file:]), line, cstring(strings[cost:])))
+        off += DEBUG_ROW.size
+    return funcs, rows
