@@ -1,0 +1,6 @@
+{
+    "text": [252, 0, 0, 0],
+    "data": [1, 2, 3, 4],
+    "symbols": [ {"name": "unused", "type": 1, "section": 0, "offset": 0} ],
+    "relocs": []
+}

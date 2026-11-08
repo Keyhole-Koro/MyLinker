@@ -42,6 +42,14 @@ TESTS = [
 # out, or it would split `helper` in two for a reader of the map.
 MAP_TEST = ("test_map", ["test_map_A.json"], ["0x00000000 __START__", "0x00000004 helper"], ["b_loop"])
 
+# A whole MBIN image and its map, byte for byte: text and page-aligned data
+# from two objects, their collected-section chunks laid out by name with the
+# directory after them, all three relocation types in every section that may
+# hold them, and C dropped because nothing needs it. After an intended change
+# to the layout, regenerate test_image.bin and test_image.map from this link.
+IMAGE_TEST = ("test_image", ["test_image_A.json", "test_image_B.json", "test_image_C.json"],
+              ["--header", "--base", "1000"])
+
 
 def colored(text, color_code):
     return f"\033[{color_code}m{text}\033[0m"
@@ -118,6 +126,25 @@ if __name__ == "__main__":
             failed += 1
         else:
             status_line("PASS", f"{name} names unreferenced functions only", "32")
+            passed += 1
+
+        name, json_inputs, flags = IMAGE_TEST
+        obj_files = []
+        for json_file in json_inputs:
+            output_obj = temp_root / json_file.replace(".json", ".obj")
+            run(["python3", str(OBJ_GEN), str(TEST_DIR / json_file), str(output_obj)])
+            obj_files.append(str(output_obj))
+        output_bin = temp_root / f"{name}.bin"
+        map_path = temp_root / f"{name}.map"
+        run([str(LINKER_EXE)] + flags + ["--map", str(map_path), str(output_bin)] + obj_files)
+        differ = [path.name for path, expected in ((output_bin, TEST_DIR / f"{name}.bin"),
+                                                   (map_path, TEST_DIR / f"{name}.map"))
+                  if path.read_bytes() != expected.read_bytes()]
+        if differ:
+            status_line("FAIL", f"{name} differs from the expected {', '.join(differ)}", "31")
+            failed += 1
+        else:
+            status_line("PASS", f"{name} image and map match byte for byte", "32")
             passed += 1
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

@@ -1,0 +1,21 @@
+{
+    "text": [8, 32, 0, 0, 252, 0, 0, 0],
+    "data": [170, 187, 204, 221, 0, 0, 0, 0],
+    "blob": [0, 0, 0, 3, 0, 0, 0, 0],
+    "symbols": [
+        {"name": "fnB", "type": 1, "section": 0, "offset": 0},
+        {"name": "dataB", "type": 1, "section": 1, "offset": 0},
+        {"name": "noteB", "type": 1, "section": 2, "offset": 0},
+        {"name": "rowB", "type": 1, "section": 2, "offset": 4},
+        {"name": "tableA", "type": 0, "section": 0, "offset": 0}
+    ],
+    "relocs": [
+        {"offset": 0, "symbol_name": "tableA", "type": 0, "section": 0},
+        {"offset": 4, "symbol_name": "noteA", "type": 2, "section": 1},
+        {"offset": 4, "symbol_name": "dataB", "type": 2, "section": 2}
+    ],
+    "collects": [
+        {"name": "notes", "offset": 0, "size": 4},
+        {"name": "rows", "offset": 4, "size": 4}
+    ]
+}

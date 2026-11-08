@@ -1,0 +1,16 @@
+# MyLinker symbol map
+# text: 0x1000 .. 0x1020 (32 bytes)
+# data: 0x2000 .. 0x2058 (88 bytes)
+0x00001000 __START__
+0x00001010 loop-[a:1]
+0x00001018 fnB
+0x00002000 tableA
+0x00002008 dataB
+0x00002010 __section_rows
+0x00002018 rowB
+0x0000201C __section_notes
+0x0000201C noteA
+0x00002024 __sections
+0x0000202C __section_rows_size
+0x00002038 __section_notes_size
+0x00002058 _end
