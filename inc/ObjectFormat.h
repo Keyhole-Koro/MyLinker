@@ -46,6 +46,15 @@ struct FileHeader {
     uint32_t collect_size;    // bytes of the collected-section blob (after the data section)
 };
 
+// A label the assembler does not export is renamed to be private to its
+// object: `<label>-[<module>:<n>]`, <module> being the stem of the source
+// file and <n> counting the file's private labels. Only its own object
+// refers to such a name. The linker knows one by PRIVATE_LABEL_MARK and
+// leaves it out of the duplicate-definition check -- two source files with
+// the same stem repeat names -- and out of the symbol map unless referenced.
+#define PRIVATE_LABEL_MARK "-["
+#define PRIVATE_LABEL_FORMAT "%s" PRIVATE_LABEL_MARK "%s:%u]"
+
 // An undefined symbol has no section or offset of its own: both are 0.
 struct SymbolEntry {
     char name[64];

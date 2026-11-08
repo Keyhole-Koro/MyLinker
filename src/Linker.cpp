@@ -63,6 +63,11 @@ static bool is_mergeable_instantiation(const char* name) {
     return std::strncmp(name, kPrefix, sizeof(kPrefix) - 1) == 0;
 }
 
+// A label the assembler made private to its object (ObjectFormat.h).
+bool is_private_label(const char* name) {
+    return std::strstr(name, PRIVATE_LABEL_MARK) != nullptr;
+}
+
 bool load_object_file(const std::string& path, LoadedObject& obj) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -300,7 +305,7 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
                 // (TestKit's runtime/verdict.mln and platform/.../verdict.mln)
                 // repeat tags, and such labels are never referenced across
                 // objects anyway.
-                if (!is_mergeable_instantiation(sym.name) && std::strstr(sym.name, "-[") == nullptr) {
+                if (!is_mergeable_instantiation(sym.name) && !is_private_label(sym.name)) {
                     auto seen = all_definitions.find(sym.name);
                     if (seen != all_definitions.end()) {
                         std::cerr << "Error: Duplicate symbol definition '" << sym.name
@@ -557,7 +562,7 @@ std::map<std::string, uint32_t> collect_map_symbols(
     for (const auto& obj : objects) {
         for (const auto& sym : obj.symbols) {
             if (sym.type != SYMBOL_DEFINED) continue;
-            if (std::strstr(sym.name, "-[") != nullptr) continue;
+            if (is_private_label(sym.name)) continue;
             if (sym.section == SECTION_TEXT) {
                 symbols.emplace(sym.name, obj.text_base_addr + sym.offset);
             } else if (sym.section == SECTION_DATA) {

@@ -29,6 +29,10 @@ RELOC_ABSOLUTE = 0  # 21-bit immediate of `movi rX, label`
 RELOC_RELATIVE = 1  # 26-bit pc-relative offset of a call or jump
 RELOC_WORD32 = 2    # a whole data word (`.word label`)
 
+# A label the assembler makes private to its object is named
+# `<label>-[<module>:<n>]` (PRIVATE_LABEL_FORMAT); the mark identifies one.
+PRIVATE_LABEL_MARK = "-["
+
 SECTION_NAMES = {SECTION_TEXT: "TEXT", SECTION_DATA: "DATA", SECTION_COLLECT: "COLLECT"}
 SYMBOL_TYPE_NAMES = {SYMBOL_UNDEFINED: "UNDEFINED", SYMBOL_DEFINED: "DEFINED"}
 RELOC_TYPE_NAMES = {RELOC_ABSOLUTE: "ABSOLUTE", RELOC_RELATIVE: "RELATIVE", RELOC_WORD32: "WORD32"}
