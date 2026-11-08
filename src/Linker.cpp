@@ -40,11 +40,22 @@ struct CollectedSection {
 static std::vector<CollectedSection> collected_sections;
 static std::vector<uint8_t> collect_index;        // the directory, after the chunks
 
-static void push_word_be(std::vector<uint8_t>& out, uint32_t v) {
-    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
-    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>(v & 0xFF));
+// Words in the image are big-endian, as the machine reads them.
+uint32_t read_be32(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+}
+
+void write_be32(uint8_t* p, uint32_t v) {
+    p[0] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    p[1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+    p[2] = static_cast<uint8_t>((v >> 8) & 0xFF);
+    p[3] = static_cast<uint8_t>(v & 0xFF);
+}
+
+void append_be32(std::vector<uint8_t>& out, uint32_t v) {
+    out.resize(out.size() + 4);
+    write_be32(&out[out.size() - 4], v);
 }
 
 static bool is_mergeable_instantiation(const char* name) {
@@ -254,18 +265,18 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
         std::vector<uint8_t> names;
         for (size_t i = 0; i < collected_sections.size(); ++i) {
             const auto& sec = collected_sections[i];
-            push_word_be(collect_index, names_at + static_cast<uint32_t>(names.size()));
-            push_word_be(collect_index, sec.start);
-            push_word_be(collect_index, sec.size);
+            append_be32(collect_index, names_at + static_cast<uint32_t>(names.size()));
+            append_be32(collect_index, sec.start);
+            append_be32(collect_index, sec.size);
             names.insert(names.end(), sec.name.begin(), sec.name.end());
             names.push_back(0);
             while (names.size() % 4 != 0) names.push_back(0);
             global_symbol_table["__section_" + sec.name] = sec.start;
             global_symbol_table["__section_" + sec.name + "_size"] = at + static_cast<uint32_t>(i * row_bytes) + 8;
         }
-        push_word_be(collect_index, 0);
-        push_word_be(collect_index, 0);
-        push_word_be(collect_index, 0);
+        append_be32(collect_index, 0);
+        append_be32(collect_index, 0);
+        append_be32(collect_index, 0);
         collect_index.insert(collect_index.end(), names.begin(), names.end());
         global_symbol_table["__sections"] = at;
         total_data_size += (at - data_at) + static_cast<uint32_t>(collect_index.size());
@@ -372,6 +383,29 @@ const LinkRedirect* redirect_for(const std::vector<LinkRedirect>& redirects,
     return nullptr;
 }
 
+// The word a relocation leaves at address `pc`, from the word the assembler
+// left there and the symbol's final address. RELATIVE fills a call or jump's
+// low 26 bits with `target - pc`, the offset in bytes from the instruction
+// itself, as the assembler encodes a jump to a local label; ABSOLUTE fills
+// MOVI's low 21-bit immediate. Both keep the opcode and register bits.
+// WORD32 replaces the whole word.
+uint32_t patch_word(uint32_t type, uint32_t existing, uint32_t target, uint32_t pc) {
+    switch (type) {
+    case RELOC_WORD32:
+        return target;
+    case RELOC_RELATIVE:
+        return (existing & 0xFC000000u) | ((target - pc) & 0x03FFFFFFu);
+    case RELOC_ABSOLUTE:
+        return (existing & 0xFFE00000u) | (target & 0x001FFFFFu);
+    default:
+        // No object carries another type; one has always been taken as an
+        // ABSOLUTE to address 0.
+        return existing & 0xFFE00000u;
+    }
+}
+
+// Patch every relocation of the live objects with its symbol's final
+// address (see patch_word).
 bool apply_relocations(std::vector<LoadedObject>& objects,
                        const std::map<std::string, uint32_t>& global_symbol_table,
                        const std::vector<LinkRedirect>& redirects) {
@@ -388,156 +422,44 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
                 }
             }
 
-            if (global_symbol_table.find(sym_name) == global_symbol_table.end()) {
+            auto symbol = global_symbol_table.find(sym_name);
+            if (symbol == global_symbol_table.end()) {
                 std::cerr << "Error: Undefined symbol '" << sym_name << "' referenced in "
                           << obj.filename << std::endl;
                 return false;
             }
+            uint32_t target_addr = symbol->second;
 
-            uint32_t target_addr = global_symbol_table.at(sym_name);
-            uint32_t patch_offset = reloc.offset; // Offset within this file's TEXT section, data or blob
+            uint32_t patch_offset = reloc.offset; // within this object's text, data or blob
             bool in_blob = reloc.section == SECTION_COLLECT;
             bool in_data = reloc.section == SECTION_DATA;
             std::vector<uint8_t>& section_bytes = in_blob ? obj.collect_blob
                                                  : (in_data ? obj.data_section : obj.text_section);
-
-            // Check bounds
             if (patch_offset + 4 > section_bytes.size()) {
                 std::cerr << "Error: Relocation offset out of bounds in " << obj.filename
                           << std::endl;
                 return false;
             }
-
-            // Calculate value to write
-            uint32_t value_to_write = 0;
-            uint32_t instruction_addr = obj.text_base_addr + patch_offset;
             if ((in_blob || in_data) && reloc.type != RELOC_WORD32) {
                 std::cerr << "Error: only .word relocations are allowed in a data or collected section ("
                           << obj.filename << ")" << std::endl;
                 return false;
             }
-
-            if (reloc.type == RELOC_ABSOLUTE || reloc.type == RELOC_WORD32) {
-                value_to_write = target_addr;
-            } else if (reloc.type == RELOC_RELATIVE) {
-                // Relative Jump: follow assembler's encoding, which uses (target - currentPC)
-                int32_t offset = target_addr - instruction_addr;
-
-                // Mask to 26 bits (signed) if necessary, but we write 32 bits into the slot usually?
-                // Wait, if it's a 26-bit jump instruction, we need to mask and merge.
-                // The design doc says: "Write the value into the corresponding 'hole' in the binary buffer."
-                // It doesn't specify instruction format details deeply.
-                // Assuming the hole is 32-bit for now or we just overwrite the field.
-                // CAUTION: If it's a partial instruction overwrite (like `B label`), we need to preserve opcode.
-                // BUT, Design doc Section 4 says: "leave a placeholder (0) in the machine code".
-                // If the assembler leaves 0, does it leave the opcode?
-                // If the assembler leaves 0 for the *whole instruction*, that's bad.
-                // A typical linkable object for a RISC arch usually has the opcode present and the immediate field 0.
-
-                // Let's assume the assembler leaves the opcode valid and the immediate 0.
-                // We need to read the existing instruction to preserve opcode?
-                // Or maybe the 'hole' is just the immediate field?
-                // The Design doc implies simple patching.
-                // "Write the value into the corresponding 'hole' in the binary buffer."
-                // "RelocEntry: uint32_t offset; // Offset in the TEXT section to patch"
-
-                // If the relocation type is RELATIVE, it's likely a Jump/Branch.
-                // If the "hole" is the full 32-bit word, we might destroy the opcode.
-                // However, without more instruction set details, I can't do bit-masking safely.
-                // BUT, looking at `MyAssembler`, let's see how `B` (Branch) is encoded.
-                // This is critical.
-
-                // Let's defer this specific bit-masking logic and assume for "Minimal" version:
-                // We read the 32-bit word, keep the top 6 bits (opcode?), and replace the bottom 26.
-                // Or maybe the RelocEntry assumes the assembler emitted a dummy instruction?
-                // No, "leave a placeholder (0)".
-
-                // Strategy: Read current 32-bit word.
-                // If RELOC_RELATIVE, assume it's a specific format (e.g. top 6 bits opcode, bottom 26 offset).
-                // MyComputer Architecture v3.1 confirmation needed.
-                // But for now, I will assume a standard mask: 0xFC000000 is opcode, 0x03FFFFFF is offset.
-
-                uint32_t current_inst = 0;
-                memcpy(&current_inst, &section_bytes[patch_offset], 4);
-                (void)current_inst;
-
-                // Mask: Keep top 6 bits, replace bottom 26
-                // but for a "quick" minimal implementation, this is a reasonable assumption
-                // for a custom 32-bit RISC.
-
-                // Also, relative offset is usually in words (instruction count) or bytes?
-                // ARM uses words (offset >> 2). x86 uses bytes.
-                // Design doc: "TargetAddress - (InstructionAddress + 4)" -> This is a byte difference.
-                // If the instruction expects a value in bytes, we are good.
-                // If it expects words, we need to shift.
-
-                // Let's stick to the raw value for now, or check `instructions.h` in MyAssembler if I could.
-                // I will add a TODO or just do a direct overwrite if the file says "placeholder (0)".
-                // If placeholder is 0, then `current_inst` might be just the opcode?
-
-                // No, let's just implement a generic "OR" patch for now.
-                // value_to_write = (current_inst & 0xFC000000) | (offset & 0x03FFFFFF);
-
-                // Actually, let's just write the 32-bit value for ABSOLUTE.
-                // For RELATIVE, let's assume the assembler handled the opcode and we just OR in the offset.
-                // But `offset` is signed.
-
-                value_to_write = offset;
-                // We will OR it with existing content later.
+            if (reloc.type == RELOC_ABSOLUTE && target_addr >= (1u << 21)) {
+                std::cerr << "Error: Absolute relocation target 0x" << std::hex
+                          << target_addr << std::dec
+                          << " exceeds 21-bit immediate range in " << obj.filename
+                          << std::endl;
+                return false;
             }
 
-            // Apply patch
-            // We need to read existing to preserve bits if it's not a full overwrite
-            // Handle Big Endian read/write manually to avoid host endianness issues
-            uint8_t* ptr = &section_bytes[patch_offset];
-            uint32_t existing = (static_cast<uint32_t>(ptr[0]) << 24) |
-                                (static_cast<uint32_t>(ptr[1]) << 16) |
-                                (static_cast<uint32_t>(ptr[2]) << 8)  |
-                                static_cast<uint32_t>(ptr[3]);
-
-            uint32_t final_val = 0;
-
-            if (reloc.type == RELOC_WORD32) {
-                // A data word (.word symbol): the whole 32 bits are the address.
-                final_val = value_to_write;
-            } else if (reloc.type == RELOC_RELATIVE) {
-                // Preserving top 6 bits (Opcode) - Assumption based on typical custom CPU
-                // And assuming the offset field is the lower 26 bits.
-                // Check if offset fits in 26 bits?
-                // (offset & ~0x03FFFFFF) should be 0 or all 1s.
-                final_val = (existing & 0xFC000000) | (value_to_write & 0x03FFFFFF);
-            } else {
-                // RELOC_ABSOLUTE
-                // Preserve opcode+register bits for reg,imm21 style instructions like
-                // MOVI rX, label and patch only the low 21-bit immediate field.
-                if (value_to_write >= (1u << 21)) {
-                    std::cerr << "Error: Absolute relocation target 0x" << std::hex
-                              << value_to_write << std::dec
-                              << " exceeds 21-bit immediate range in " << obj.filename
-                              << std::endl;
-                    return false;
-                }
-                final_val = (existing & 0xFFE00000u) | (value_to_write & 0x001FFFFFu);
-            }
-
-            // Write back in Big Endian
-            ptr[0] = static_cast<uint8_t>((final_val >> 24) & 0xFF);
-            ptr[1] = static_cast<uint8_t>((final_val >> 16) & 0xFF);
-            ptr[2] = static_cast<uint8_t>((final_val >> 8) & 0xFF);
-            ptr[3] = static_cast<uint8_t>(final_val & 0xFF);
+            uint8_t* word = &section_bytes[patch_offset];
+            uint32_t pc = obj.text_base_addr + patch_offset;
+            write_be32(word, patch_word(reloc.type, read_be32(word), target_addr, pc));
         }
     }
 
     return true;
-}
-
-static void write_be32(std::ostream& os, uint32_t val) {
-    uint8_t b[4];
-    b[0] = static_cast<uint8_t>((val >> 24) & 0xFF);
-    b[1] = static_cast<uint8_t>((val >> 16) & 0xFF);
-    b[2] = static_cast<uint8_t>((val >> 8) & 0xFF);
-    b[3] = static_cast<uint8_t>(val & 0xFF);
-    os.write(reinterpret_cast<const char*>(b), 4);
 }
 
 bool write_output(const std::string& output_path,
@@ -562,15 +484,24 @@ bool write_output(const std::string& output_path,
         uint32_t sections_offset = collected_sections.empty()
             ? 0u
             : static_cast<uint32_t>(sizeof(MbinHeader)) + total_text_size + plain_data + chunk_bytes;
-        write_be32(outfile, MBIN_MAGIC);
-        write_be32(outfile, MBIN_VERSION_2);
-        write_be32(outfile, entry_point);
-        write_be32(outfile, sizeof(MbinHeader)); // text_offset = 36
-        write_be32(outfile, total_text_size);
-        write_be32(outfile, sizeof(MbinHeader) + total_text_size); // data_offset
-        write_be32(outfile, total_data_size);
-        write_be32(outfile, 0); // bss_size
-        write_be32(outfile, sections_offset);
+        const uint32_t header_size = static_cast<uint32_t>(sizeof(MbinHeader));
+        const uint32_t fields[] = {
+            MBIN_MAGIC,
+            MBIN_VERSION_2,
+            entry_point,
+            header_size,                   // text_offset = 36
+            total_text_size,
+            header_size + total_text_size, // data_offset
+            total_data_size,
+            0,                             // bss_size
+            sections_offset,
+        };
+        static_assert(sizeof(fields) == sizeof(MbinHeader), "one word per MbinHeader field");
+        uint8_t header[sizeof(MbinHeader)];
+        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+            write_be32(&header[4 * i], fields[i]);
+        }
+        outfile.write(reinterpret_cast<const char*>(header), sizeof(header));
     }
 
     // Write all Text sections

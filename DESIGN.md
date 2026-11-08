@@ -111,9 +111,13 @@ The linker will perform the following passes:
 2.  For each relocation:
     *   Look up `symbol_name` in Global Symbol Table.
     *   Calculate the patch value:
-        *   **ABSOLUTE:** `TargetAddress`
-        *   **RELATIVE:** `TargetAddress - (InstructionAddress + 4)` (Note: Adjust for PC behavior)
-    *   Write the value into the corresponding "hole" in the binary buffer.
+        *   **ABSOLUTE:** `TargetAddress`, into the low 21 bits (the `MOVI` immediate)
+        *   **RELATIVE:** `TargetAddress - InstructionAddress`, into the low 26 bits (a call or
+            jump's offset in bytes, counted from the instruction itself, as the assembler encodes
+            a local jump)
+        *   **WORD32:** `TargetAddress`, the whole word (`.word symbol`)
+    *   Write the value into the corresponding "hole" in the binary buffer, keeping the opcode
+        and register bits the assembler left around it.
 
 ### Pass 3: Output
 1.  Write the combined Text and Data buffers to `program.bin`.
