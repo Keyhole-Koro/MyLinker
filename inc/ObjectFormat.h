@@ -6,6 +6,7 @@
 // The constants are enumerators, not `const` variables, so that any C or C++
 // file can include this header: in C a file-scope const is a definition with
 // external linkage, and two C files defining it would not link together.
+// tools/objformat.py repeats them for the Python tools.
 
 // "LNK3" (LNK1 + collected sections, see CollectEntry). The header and the
 // tables are written in the host's byte order, little-endian in practice; the

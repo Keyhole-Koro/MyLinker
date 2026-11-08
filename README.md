@@ -6,6 +6,7 @@ This is a minimal implementation of the `MyCCLinker` consistent with the design 
 *   `inc/ObjectFormat.h`: Defines the `.obj` file format (Header, Sections, Symbols, Relocs).
 *   `src/main.cpp`: The linker implementation (C++).
 *   `tools/obj_gen.py`: A helper script to generate `.obj` files from JSON (since Assembler support is pending).
+*   `tools/objformat.py`: The format's constants and record layouts for the Python tools, repeated from `inc/ObjectFormat.h`.
 *   `test/`: Sample JSON inputs for testing.
 
 ## How to Build

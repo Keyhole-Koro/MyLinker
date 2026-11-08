@@ -1,82 +1,43 @@
-import struct
 import json
 import sys
 
-# Constants
-MAGIC = 0x4C4E4B33  # "LNK3"
-SECTION_TEXT = 0
-SECTION_DATA = 1
-SYMBOL_UNDEFINED = 0
-SYMBOL_DEFINED = 1
-RELOC_ABSOLUTE = 0
-RELOC_RELATIVE = 1
+from objformat import COLLECT_ENTRY, FILE_HEADER, LINKER_MAGIC, RELOC_ENTRY, SYMBOL_ENTRY
+
 
 def create_object_file(json_path, output_path):
     with open(json_path, 'r') as f:
         data = json.load(f)
 
-    # Prepare Data
     text_bytes = bytes(data.get('text', []))
     data_bytes = bytes(data.get('data', []))
-    
+    blob_bytes = bytes(data.get('blob', []))
     symbols = data.get('symbols', [])
     relocs = data.get('relocs', [])
-
-    # Header
-    # uint32_t magic;
-    # uint32_t text_size;
-    # uint32_t data_size;
-    # uint32_t symtable_count;
-    # uint32_t reloc_count;
-    
     collects = data.get('collects', [])
-    blob_bytes = bytes(data.get('blob', []))
-
-    header = struct.pack('<IIIIIII',
-                         MAGIC,
-                         len(text_bytes),
-                         len(data_bytes),
-                         len(symbols),
-                         len(relocs),
-                         len(collects),
-                         len(blob_bytes))
 
     with open(output_path, 'wb') as out:
-        out.write(header)
+        out.write(FILE_HEADER.pack(LINKER_MAGIC,
+                                   len(text_bytes),
+                                   len(data_bytes),
+                                   len(symbols),
+                                   len(relocs),
+                                   len(collects),
+                                   len(blob_bytes)))
         out.write(text_bytes)
         out.write(data_bytes)
         out.write(blob_bytes)
-        
-        # Write Symbols
-        # char name[64];
-        # uint32_t type;
-        # uint32_t section;
-        # uint32_t offset;
-        for sym in symbols:
-            name = sym['name'].encode('utf-8')
-            # Pad name to 64 bytes
-            name = name + b'\0' * (64 - len(name))
-            entry = struct.pack('<64sIII', name, sym['type'], sym['section'], sym['offset'])
-            out.write(entry)
-            
-        # Write Relocs
-        # uint32_t offset;
-        # char symbol_name[64];
-        # uint32_t type;
-        for reloc in relocs:
-            sym_name = reloc['symbol_name'].encode('utf-8')
-            sym_name = sym_name + b'\0' * (64 - len(sym_name))
-            entry = struct.pack('<I64sII', reloc['offset'], sym_name, reloc['type'], reloc.get('section', 0))
-            out.write(entry)
 
-        # Write collected-section chunks
-        # char name[64];
-        # uint32_t offset;
-        # uint32_t size;
+        # Names are NUL-padded to their 64-byte fields by the struct format.
+        for sym in symbols:
+            out.write(SYMBOL_ENTRY.pack(sym['name'].encode('utf-8'), sym['type'],
+                                        sym['section'], sym['offset']))
+
+        for reloc in relocs:
+            out.write(RELOC_ENTRY.pack(reloc['offset'], reloc['symbol_name'].encode('utf-8'),
+                                       reloc['type'], reloc.get('section', 0)))
+
         for ce in collects:
-            name = ce['name'].encode('utf-8')
-            name = name + b'\0' * (64 - len(name))
-            out.write(struct.pack('<64sII', name, ce['offset'], ce['size']))
+            out.write(COLLECT_ENTRY.pack(ce['name'].encode('utf-8'), ce['offset'], ce['size']))
 
     print(f"Created {output_path}")
 

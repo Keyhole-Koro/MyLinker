@@ -4,34 +4,34 @@ Lightweight objdump for the custom MyLinker object format.
 Shows header, text/data bytes, symbols, and relocations.
 """
 import argparse
-import struct
 import sys
 from pathlib import Path
 
-MAGIC = 0x4C4E4B33  # "LNK3"
-
-SECTION_NAMES = {
-    0: "TEXT",
-    1: "DATA",
-}
+from objformat import (
+    COLLECT_ENTRY,
+    FILE_HEADER,
+    LINKER_MAGIC,
+    RELOC_ABSOLUTE,
+    RELOC_ENTRY,
+    RELOC_RELATIVE,
+    RELOC_WORD32,
+    SECTION_NAMES,
+    SYMBOL_DEFINED,
+    SYMBOL_ENTRY,
+    SYMBOL_UNDEFINED,
+    cstring,
+)
 
 SYMBOL_TYPES = {
-    0: "UNDEF",
-    1: "DEF",
+    SYMBOL_UNDEFINED: "UNDEF",
+    SYMBOL_DEFINED: "DEF",
 }
 
 RELOC_TYPES = {
-    0: "ABS",
-    1: "REL",
+    RELOC_ABSOLUTE: "ABS",
+    RELOC_RELATIVE: "REL",
+    RELOC_WORD32: "WORD32",
 }
-
-
-def read_cstring(raw: bytes) -> str:
-    """Decode a fixed-length, NUL-terminated string field."""
-    try:
-        return raw.split(b"\0", 1)[0].decode("utf-8", errors="replace")
-    except Exception:
-        return ""
 
 
 def hexdump(data: bytes, base: int = 0, width: int = 16):
@@ -45,17 +45,16 @@ def hexdump(data: bytes, base: int = 0, width: int = 16):
 
 def parse_obj(path: Path):
     buf = path.read_bytes()
-    hdr_size = struct.calcsize("<IIIIIII")
-    if len(buf) < hdr_size:
+    if len(buf) < FILE_HEADER.size:
         raise ValueError("File too small to contain header")
 
-    magic, text_size, data_size, sym_cnt, reloc_cnt, collect_cnt, collect_size = struct.unpack_from(
-        "<IIIIIII", buf, 0
+    magic, text_size, data_size, sym_cnt, reloc_cnt, collect_cnt, collect_size = FILE_HEADER.unpack_from(
+        buf, 0
     )
-    if magic != MAGIC:
-        raise ValueError(f"Bad magic 0x{magic:08x} (expected 0x{MAGIC:08x})")
+    if magic != LINKER_MAGIC:
+        raise ValueError(f"Bad magic 0x{magic:08x} (expected 0x{LINKER_MAGIC:08x})")
 
-    off = hdr_size
+    off = FILE_HEADER.size
     text = buf[off : off + text_size]
     off += text_size
     data_sec = buf[off : off + data_size]
@@ -64,45 +63,42 @@ def parse_obj(path: Path):
     off += collect_size
 
     syms = []
-    sym_struct = struct.Struct("<64sIII")
     for _ in range(sym_cnt):
-        if off + sym_struct.size > len(buf):
+        if off + SYMBOL_ENTRY.size > len(buf):
             raise ValueError("Truncated symbol table")
-        raw = sym_struct.unpack_from(buf, off)
+        raw = SYMBOL_ENTRY.unpack_from(buf, off)
         syms.append(
             {
-                "name": read_cstring(raw[0]),
+                "name": cstring(raw[0]),
                 "type": raw[1],
                 "section": raw[2],
                 "offset": raw[3],
             }
         )
-        off += sym_struct.size
+        off += SYMBOL_ENTRY.size
 
     relocs = []
-    reloc_struct = struct.Struct("<I64sII")
     for _ in range(reloc_cnt):
-        if off + reloc_struct.size > len(buf):
+        if off + RELOC_ENTRY.size > len(buf):
             raise ValueError("Truncated relocation table")
-        raw = reloc_struct.unpack_from(buf, off)
+        raw = RELOC_ENTRY.unpack_from(buf, off)
         relocs.append(
             {
                 "offset": raw[0],
-                "symbol_name": read_cstring(raw[1]),
+                "symbol_name": cstring(raw[1]),
                 "type": raw[2],
                 "section": raw[3],
             }
         )
-        off += reloc_struct.size
+        off += RELOC_ENTRY.size
 
     collects = []
-    collect_struct = struct.Struct("<64sII")
     for _ in range(collect_cnt):
-        if off + collect_struct.size > len(buf):
+        if off + COLLECT_ENTRY.size > len(buf):
             raise ValueError("Truncated collected-section table")
-        raw = collect_struct.unpack_from(buf, off)
-        collects.append({"name": read_cstring(raw[0]), "offset": raw[1], "size": raw[2]})
-        off += collect_struct.size
+        raw = COLLECT_ENTRY.unpack_from(buf, off)
+        collects.append({"name": cstring(raw[0]), "offset": raw[1], "size": raw[2]})
+        off += COLLECT_ENTRY.size
 
     return {
         "text": text,
@@ -169,7 +165,7 @@ def dump_obj(path: Path, args):
 
 def main(argv):
     ap = argparse.ArgumentParser(
-        description="objdump for MyLinker object files (LNK1 format)"
+        description="objdump for MyLinker object files (LNK3 format)"
     )
     ap.add_argument("files", nargs="+", type=Path, help="object file(s) to dump")
     ap.add_argument(
