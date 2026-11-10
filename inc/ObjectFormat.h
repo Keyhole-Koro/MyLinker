@@ -25,6 +25,10 @@ enum ObjSection {
 enum ObjSymbolType {
     SYMBOL_UNDEFINED = 0, // imported: another object defines it
     SYMBOL_DEFINED = 1,   // defined here, at `offset` in `section`
+    SYMBOL_SHARED = 2,    // defined here, and private to its source module: the
+                          // object refers to it by its private label, and
+                          // another object may name it only while no other
+                          // object defines or shares the name (`share name`)
 };
 
 // RelocEntry.type
@@ -32,6 +36,8 @@ enum ObjRelocType {
     RELOC_ABSOLUTE = 0, // absolute address into a 21-bit immediate (MOVI rX, label)
     RELOC_RELATIVE = 1, // 26-bit pc-relative offset of a call or jump
     RELOC_WORD32 = 2,   // absolute address written in full into a data word (.word symbol)
+    RELOC_HI21 = 3,     // the address's upper 21 bits into LUI's immediate (address >> 11)
+    RELOC_LO11 = 4,     // the address's low 11 bits into ADDIS's immediate (address & 0x7FF)
 };
 
 #pragma pack(push, 1)
@@ -58,7 +64,7 @@ struct FileHeader {
 // An undefined symbol has no section or offset of its own: both are 0.
 struct SymbolEntry {
     char name[64];
-    uint32_t type;    // ObjSymbolType: UNDEFINED or DEFINED
+    uint32_t type;    // ObjSymbolType: UNDEFINED, DEFINED or SHARED
     uint32_t section; // ObjSection: TEXT, DATA or COLLECT (an offset into the blob)
     uint32_t offset;  // Offset relative to section start
 };
@@ -66,7 +72,7 @@ struct SymbolEntry {
 struct RelocEntry {
     uint32_t offset;      // Offset to patch, within `section`
     char symbol_name[64]; // Name of the symbol to resolve
-    uint32_t type;        // ObjRelocType: ABSOLUTE, RELATIVE or WORD32
+    uint32_t type;        // ObjRelocType
     uint32_t section;     // ObjSection: TEXT, DATA or COLLECT; only a WORD32 patches DATA or COLLECT
 };
 

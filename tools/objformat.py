@@ -23,19 +23,23 @@ SECTION_COLLECT = 2  # the object's collected-section blob
 # SymbolEntry.type
 SYMBOL_UNDEFINED = 0
 SYMBOL_DEFINED = 1
+SYMBOL_SHARED = 2   # private to its module; other objects may name it if no other shares it
 
 # RelocEntry.type
 RELOC_ABSOLUTE = 0  # 21-bit immediate of `movi rX, label`
 RELOC_RELATIVE = 1  # 26-bit pc-relative offset of a call or jump
 RELOC_WORD32 = 2    # a whole data word (`.word label`)
+RELOC_HI21 = 3      # LUI's immediate: the address's upper 21 bits (`movi rX, label`)
+RELOC_LO11 = 4      # ADDIS's immediate: the address's low 11 bits (`movi rX, label`)
 
 # A label the assembler makes private to its object is named
 # `<label>-[<module>:<n>]` (PRIVATE_LABEL_FORMAT); the mark identifies one.
 PRIVATE_LABEL_MARK = "-["
 
 SECTION_NAMES = {SECTION_TEXT: "TEXT", SECTION_DATA: "DATA", SECTION_COLLECT: "COLLECT"}
-SYMBOL_TYPE_NAMES = {SYMBOL_UNDEFINED: "UNDEFINED", SYMBOL_DEFINED: "DEFINED"}
-RELOC_TYPE_NAMES = {RELOC_ABSOLUTE: "ABSOLUTE", RELOC_RELATIVE: "RELATIVE", RELOC_WORD32: "WORD32"}
+SYMBOL_TYPE_NAMES = {SYMBOL_UNDEFINED: "UNDEFINED", SYMBOL_DEFINED: "DEFINED", SYMBOL_SHARED: "SHARED"}
+RELOC_TYPE_NAMES = {RELOC_ABSOLUTE: "ABSOLUTE", RELOC_RELATIVE: "RELATIVE", RELOC_WORD32: "WORD32",
+                    RELOC_HI21: "HI21", RELOC_LO11: "LO11"}
 
 # magic, text_size, data_size, symtable_count, reloc_count, collect_count, collect_size
 FILE_HEADER = struct.Struct("<7I")

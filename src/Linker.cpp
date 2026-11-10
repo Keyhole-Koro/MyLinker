@@ -183,7 +183,8 @@ std::set<std::string> keep_live_objects(std::vector<LoadedObject>& objects,
         for (size_t i = 0; i < objects.size(); ++i) {
             if (object_active[i]) continue;
             for (const auto& sym : objects[i].symbols) {
-                if (sym.type == SYMBOL_DEFINED && needed_symbols.count(sym.name)) {
+                if ((sym.type == SYMBOL_DEFINED || sym.type == SYMBOL_SHARED) &&
+                    needed_symbols.count(sym.name)) {
                     object_active[i] = true;
                     changed = true;
                     break;
@@ -305,13 +306,25 @@ uint32_t symbol_address(const LoadedObject& obj, const SymbolEntry& sym) {
 }
 
 // Enter every needed symbol the live objects define in the table, and
-// reject a name two objects define.
+// reject a name two objects define. A shared name -- a function private to its
+// module (`share name`) -- may be shared by several objects, each referring to
+// its own by its private label; another object may name it only while one
+// object alone defines or shares it, so a needed name shared twice is an error.
 bool define_symbols(const std::vector<LoadedObject>& objects,
                     const std::set<std::string>& needed_symbols,
                     std::map<std::string, uint32_t>& global_symbol_table) {
     std::map<std::string, std::string> all_definitions; // name -> first defining object
+    std::map<std::string, std::vector<std::string>> sharers; // needed shared name -> its objects
+    std::map<std::string, uint32_t> shared_addresses;
     for (const auto& obj : objects) {
         for (const auto& sym : obj.symbols) {
+            if (sym.type == SYMBOL_SHARED) {
+                if (needed_symbols.count(sym.name)) {
+                    sharers[sym.name].push_back(obj.filename);
+                    shared_addresses[sym.name] = symbol_address(obj, sym);
+                }
+                continue;
+            }
             if (sym.type != SYMBOL_DEFINED) continue;
             // Two objects defining the same name is an error whether or
             // not anyone references it: a reference would silently bind
@@ -343,6 +356,20 @@ bool define_symbols(const std::vector<LoadedObject>& objects,
             }
             global_symbol_table[sym.name] = symbol_address(obj, sym);
         }
+    }
+    for (const auto& [name, owners] : sharers) {
+        if (all_definitions.count(name)) {
+            std::cerr << "Error: '" << name << "' is defined in " << all_definitions[name]
+                      << " and private to " << owners[0] << "; rename one" << std::endl;
+            return false;
+        }
+        if (owners.size() > 1) {
+            std::cerr << "Error: '" << name << "' is private to more than one module ("
+                      << owners[0] << ", " << owners[1]
+                      << "), and another object names it" << std::endl;
+            return false;
+        }
+        global_symbol_table[name] = shared_addresses[name];
     }
     return true;
 }
@@ -383,7 +410,8 @@ bool layout_and_define_symbols(std::vector<LoadedObject>& objects,
 
 bool object_defines_symbol(const LoadedObject& object, const std::string& name) {
     for (const auto& symbol : object.symbols) {
-        if (symbol.type == SYMBOL_DEFINED && name == symbol.name) return true;
+        if ((symbol.type == SYMBOL_DEFINED || symbol.type == SYMBOL_SHARED) &&
+            name == symbol.name) return true;
     }
     return false;
 }
@@ -402,15 +430,19 @@ const LinkRedirect* redirect_for(const std::vector<LinkRedirect>& redirects,
 // Whether `type` is one of ObjectFormat.h's ObjRelocType, which patch_word
 // handles. An object with any other is malformed.
 bool known_reloc_type(uint32_t type) {
-    return type == RELOC_ABSOLUTE || type == RELOC_RELATIVE || type == RELOC_WORD32;
+    return type == RELOC_ABSOLUTE || type == RELOC_RELATIVE || type == RELOC_WORD32 ||
+           type == RELOC_HI21 || type == RELOC_LO11;
 }
 
 // The word a relocation leaves at address `pc`, from the word the assembler
 // left there and the symbol's final address. RELATIVE fills a call or jump's
 // low 26 bits with `target - pc`, the offset in bytes from the instruction
 // itself, as the assembler encodes a jump to a local label; ABSOLUTE fills
-// MOVI's low 21-bit immediate. Both keep the opcode and register bits.
-// WORD32 replaces the whole word.
+// MOVI's low 21-bit immediate. HI21 and LO11 split a full address over the
+// LUI and ADDIS the assembler writes for `movi rX, symbol`: LUI takes bits
+// 31..11 and ADDIS adds bits 10..0, which as a 21-bit immediate are never
+// negative. All of these keep the opcode and register bits. WORD32 replaces
+// the whole word.
 uint32_t patch_word(uint32_t type, uint32_t existing, uint32_t target, uint32_t pc) {
     switch (type) {
     case RELOC_WORD32:
@@ -419,6 +451,10 @@ uint32_t patch_word(uint32_t type, uint32_t existing, uint32_t target, uint32_t 
         return (existing & 0xFC000000u) | ((target - pc) & 0x03FFFFFFu);
     case RELOC_ABSOLUTE:
         return (existing & 0xFFE00000u) | (target & 0x001FFFFFu);
+    case RELOC_HI21:
+        return (existing & 0xFFE00000u) | ((target >> 11) & 0x001FFFFFu);
+    case RELOC_LO11:
+        return (existing & 0xFFE00000u) | (target & 0x000007FFu);
     }
     return existing; // not reached: apply_relocations rejects any other type
 }
@@ -581,7 +617,7 @@ std::map<std::string, uint32_t> collect_map_symbols(
     std::map<std::string, uint32_t> symbols = global_symbol_table;
     for (const auto& obj : objects) {
         for (const auto& sym : obj.symbols) {
-            if (sym.type != SYMBOL_DEFINED) continue;
+            if (sym.type != SYMBOL_DEFINED && sym.type != SYMBOL_SHARED) continue;
             if (is_private_label(sym.name)) continue;
             if (sym.section == SECTION_TEXT || sym.section == SECTION_DATA) {
                 symbols.emplace(sym.name, symbol_address(obj, sym));

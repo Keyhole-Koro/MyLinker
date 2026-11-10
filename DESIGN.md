@@ -40,11 +40,18 @@ Describes exported symbols (labels defined in this file) and imported symbols (e
 ```c
 struct SymbolEntry {
     char name[64];      // Fixed size for simplicity
-    uint32_t type;      // 0=UNDEFINED (Import), 1=DEFINED (Export)
+    uint32_t type;      // 0=UNDEFINED (Import), 1=DEFINED (Export), 2=SHARED (module-private)
     uint32_t section;   // 0=TEXT, 1=DATA, 2=COLLECT (inside the blob)
     uint32_t offset;    // Offset relative to section start
 };
 ```
+
+A `SHARED` name is a label private to its source module (`.shared name` in the
+assembly: a MyLang function that is not exported). Its own object refers to it
+by its private label, so several objects may share one name without a
+duplicate-definition error. Another object may still name it, as a test harness
+names a test function, while exactly one object shares it and none defines it;
+otherwise naming it is an error.
 
 ### 3.4 Relocation Table Entry
 Describes where the code needs patching.
@@ -53,13 +60,18 @@ Describes where the code needs patching.
 struct RelocEntry {
     uint32_t offset;      // Offset in the section to patch
     char symbol_name[64]; // Name of the symbol to resolve
-    uint32_t type;        // 0=ABSOLUTE (21-bit MOVI immediate), 1=RELATIVE (26-bit jump), 2=WORD32 (.word symbol)
+    uint32_t type;        // 0=ABSOLUTE (21-bit MOVI immediate), 1=RELATIVE (26-bit jump), 2=WORD32 (.word symbol),
+                          // 3=HI21 (LUI: address >> 11), 4=LO11 (ADDIS: address & 0x7FF)
     uint32_t section;     // 0=TEXT, 1=DATA, 2=COLLECT (a .word inside data or a chunk; WORD32 only)
 };
 ```
 
 `WORD32` writes the symbol's address into all 32 bits of a data word emitted
-by `.word symbol`; `ABSOLUTE` patches only the low 21 bits of a `MOVI`.
+by `.word symbol`; `ABSOLUTE` patches only the low 21 bits of a `MOVI`, and
+the linker refuses an address that does not fit. The assembler writes
+`movi rX, symbol` as `lui rX` and `addis rX`, relocated `HI21` and `LO11`: the
+first gets bits 31..11 of the address, the second bits 10..0, so a symbol can
+be anywhere in the address space.
 
 ### 3.5 Collected-Section Entry
 The header's `collect_count` records how many of these follow the

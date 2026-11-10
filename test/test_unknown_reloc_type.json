@@ -6,6 +6,6 @@
         { "name": "target", "type": 1, "section": 0, "offset": 4 }
     ],
     "relocs": [
-        { "offset": 0, "symbol_name": "target", "type": 3 }
+        { "offset": 0, "symbol_name": "target", "type": 9 }
     ]
 }

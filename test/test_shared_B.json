@@ -1,0 +1,10 @@
+{
+    "text": [252, 0, 0, 0, 252, 0, 0, 0],
+    "data": [],
+    "symbols": [
+        { "name": "b_entry", "type": 1, "section": 0, "offset": 0 },
+        { "name": "helper", "type": 2, "section": 0, "offset": 4 },
+        { "name": "helper-[b:1]", "type": 1, "section": 0, "offset": 4 }
+    ],
+    "relocs": []
+}

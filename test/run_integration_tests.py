@@ -35,6 +35,17 @@ TESTS = [
     # the row [name, start, size] = [52, 8, 20], a zero row at 40, "rows\0" at
     # 52. The size word at 36 reads 20; `__section_rows_size` names that word.
     ("test_collect_dir", ["test_collect_A.json", "test_collect_B.json"], True, [], (36, 0x00000014)),
+    # Both objects have a private `helper` (SYMBOL_SHARED) and each refers to
+    # its own by its private label: no duplicate. A's movi gets its own, at 8.
+    ("test_shared", ["test_shared_A.json", "test_shared_B.json"], True, [], (4, 0x08200008)),
+    # The same, but A names `helper` itself: two modules share the name, so
+    # nothing says which one is meant.
+    ("test_shared_named", ["test_shared_named_A.json", "test_shared_B.json"], False, [], None),
+    # `movi r1, target` assembles to LUI and ADDIS. Linked at 0x40000000,
+    # `target` is 0x40000008: LUI takes 0x40000008 >> 11 = 0x80000 and ADDIS
+    # its low 11 bits, 8.
+    ("test_split_address_hi", ["test_split_address.json"], True, ["--base", "40000000"], (0, 0x94280000)),
+    ("test_split_address_lo", ["test_split_address.json"], True, ["--base", "40000000"], (4, 0x64200008)),
 ]
 
 # Malformed objects the linker must refuse with an error naming the object:
@@ -47,11 +58,11 @@ REJECTED = [
     # outside the text.
     ("test_reloc_offset_wraps", ["test_reloc_offset_wraps.json"],
      "Error: Relocation offset out of bounds in"),
-    # Relocation type 3 is none of ABSOLUTE, RELATIVE and WORD32. It used to
-    # be patched as an ABSOLUTE to address 0: `movi r1, target` linked as
+    # Relocation type 9 is none of ObjRelocType. An unknown type used to be
+    # patched as an ABSOLUTE to address 0: `movi r1, target` linked as
     # `movi r1, 0`.
     ("test_unknown_reloc_type", ["test_unknown_reloc_type.json"],
-     "Error: Unknown relocation type 3 for 'target' in"),
+     "Error: Unknown relocation type 9 for 'target' in"),
 ]
 
 # `helper` is a function nothing references, so it is not in the relocation
