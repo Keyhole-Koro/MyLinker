@@ -76,6 +76,19 @@ TESTS = [
     # its low 11 bits, 8.
     ("test_split_address_hi", ["test_split_address.json"], True, ["--base", "40000000"], (0, 0x94280000)),
     ("test_split_address_lo", ["test_split_address.json"], True, ["--base", "40000000"], (4, 0x64200008)),
+    # The same base with a 0x prefix, the way the root repository passes it.
+    ("test_base_0x_prefix", ["test_split_address.json"], True, ["--base", "0x40000000"], (0, 0x94280000)),
+]
+
+# Command lines the linker must refuse before linking: exit status 1 and the
+# message. (name, flags, message); the flags come before a link of
+# test_split_address.json. `--base` used to throw on "zz" and abort, read
+# "40zz" as 0x40, and truncate an address over 32 bits to its low bits.
+CLI_REJECTED = [
+    ("test_base_not_hex", ["--base", "zz"], "Error: --base expects a hexadecimal address"),
+    ("test_base_trailing_junk", ["--base", "40zz"], "Error: --base expects a hexadecimal address"),
+    ("test_base_over_32_bits", ["--base", "100000040"], "Error: --base expects a hexadecimal address"),
+    ("test_base_prefix_only", ["--base", "0x"], "Error: --base expects a hexadecimal address"),
 ]
 
 # Malformed objects the linker must refuse with an error naming the object:
@@ -246,6 +259,18 @@ if __name__ == "__main__":
                 failed += 1
             else:
                 status_line("PASS", f"{name} rejected with its error", "32")
+                passed += 1
+
+        for name, flags, message in CLI_REJECTED:
+            obj_files = build_objects(["test_split_address.json"], temp_root)
+            result = subprocess.run([str(LINKER_EXE)] + flags + [str(temp_root / f"{name}.bin")]
+                                    + obj_files, capture_output=True, text=True)
+            if result.returncode != 1 or message not in result.stderr:
+                status_line("FAIL", f"{name} expected exit 1 and '{message}', got exit "
+                            f"{result.returncode}: {result.stderr.strip()}", "31")
+                failed += 1
+            else:
+                status_line("PASS", f"{name} refused with its error", "32")
                 passed += 1
 
         name, json_inputs, wanted, unwanted = MAP_TEST
