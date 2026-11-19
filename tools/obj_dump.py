@@ -13,11 +13,14 @@ from objformat import (
     LINKER_MAGIC,
     RELOC_ABSOLUTE,
     RELOC_ENTRY,
+    RELOC_HI21,
+    RELOC_LO11,
     RELOC_RELATIVE,
     RELOC_WORD32,
     SECTION_NAMES,
     SYMBOL_DEFINED,
     SYMBOL_ENTRY,
+    SYMBOL_SHARED,
     SYMBOL_UNDEFINED,
     cstring,
     read_debug_trailer,
@@ -26,12 +29,15 @@ from objformat import (
 SYMBOL_TYPES = {
     SYMBOL_UNDEFINED: "UNDEF",
     SYMBOL_DEFINED: "DEF",
+    SYMBOL_SHARED: "SHARED",
 }
 
 RELOC_TYPES = {
     RELOC_ABSOLUTE: "ABS",
     RELOC_RELATIVE: "REL",
     RELOC_WORD32: "WORD32",
+    RELOC_HI21: "HI21",
+    RELOC_LO11: "LO11",
 }
 
 
