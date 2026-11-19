@@ -11,8 +11,8 @@ LINKER_EXE = REPO_ROOT / "mllinker"
 OBJ_GEN = REPO_ROOT / "tools" / "obj_gen.py"
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
-from objformat import (COLLECT_ENTRY, FILE_HEADER, LINKER_MAGIC,
-                       RELOC_ENTRY, SYMBOL_ENTRY)
+from objformat import (COLLECT_ENTRY, DEBUG_HEADER, DEBUG_MAGIC, FILE_HEADER,
+                       LINKER_MAGIC, RELOC_ENTRY, SYMBOL_ENTRY)
 
 
 def raw_object(text=b"", data=b"", blob=b"", symbols=(), relocs=(), collects=(),
@@ -30,6 +30,12 @@ def raw_object(text=b"", data=b"", blob=b"", symbols=(), relocs=(), collects=(),
     out += b"".join(RELOC_ENTRY.pack(*reloc) for reloc in relocs)
     out += b"".join(COLLECT_ENTRY.pack(*ce) for ce in collects)
     return out + trailer
+
+
+# The pieces of a minimal object: `halt` at __START__.
+HALT = bytes([252, 0, 0, 0])
+START = (b"__START__", 1, 0, 0)
+HALT_OBJECT = raw_object(text=HALT, symbols=[START])
 
 
 # (name, json inputs, should_link, optional linker flags, optional expected word)
@@ -88,6 +94,35 @@ REJECTED = [
     # `movi r1, 0`.
     ("test_unknown_reloc_type", ["test_unknown_reloc_type.json"],
      "Error: Unknown relocation type 9 for 'target' in", []),
+    # Objects cut short, or whose header counts more than the file holds. A
+    # failed read used to go unnoticed: the rest of the header stayed
+    # uninitialized, a missing table read as zeros -- a collected-section
+    # chunk with an empty name -- and a huge size was allocated before
+    # anything was read.
+    ("test_header_cut", [("header_cut.obj", HALT_OBJECT[:4])],
+     "Error: Truncated header in", []),
+    ("test_header_only", [("header_only.obj", HALT_OBJECT[:FILE_HEADER.size])],
+     "Error: Truncated text section in", []),
+    ("test_text_size_huge",
+     [("text_size_huge.obj", raw_object(text=HALT, symbols=[START],
+                                        header=(LINKER_MAGIC, 0xFFFFFFF0, 0, 1, 0, 0, 0)))],
+     "Error: Truncated text section in", []),
+    ("test_symbol_count_huge",
+     [("symbol_count_huge.obj", raw_object(text=HALT, symbols=[START],
+                                           header=(LINKER_MAGIC, 4, 0, 0xFFFFFFFF, 0, 0, 0)))],
+     "Error: Truncated symbol table in", []),
+    ("test_collect_table_cut",
+     [("collect_table_cut.obj", raw_object(text=HALT, blob=bytes([1, 2, 3, 4]), symbols=[START],
+                                           collects=[(b"rows", 0, 4)])[:-COLLECT_ENTRY.size])],
+     "Error: Truncated collected-section table in", []),
+    ("test_debug_strings_huge",
+     [("debug_strings_huge.obj",
+       raw_object(text=HALT, symbols=[START], trailer=DEBUG_HEADER.pack(DEBUG_MAGIC, 0xFFFFFFF0, 0, 0)))],
+     "Error: Truncated debug trailer in", []),
+    # A 64-character name fills its field with no NUL after it; read as a C
+    # string it ran on into the next field.
+    ("test_unterminated_name", ["test_unterminated_name.json"],
+     "Error: Unterminated symbol name in", []),
 ]
 
 # `helper` is a function nothing references, so it is not in the relocation

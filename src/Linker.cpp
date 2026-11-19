@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <utility>
@@ -77,75 +78,102 @@ bool is_private_label(const char* name) {
     return std::strstr(name, PRIVATE_LABEL_MARK) != nullptr;
 }
 
+// An object file's bytes, read front to back. Nothing is read past the end:
+// a size or count from a malformed header is checked against what is left
+// before anything is allocated for it.
+class ObjectReader {
+public:
+    explicit ObjectReader(std::vector<char> bytes) : bytes_(std::move(bytes)) {}
+
+    uint64_t remaining() const { return bytes_.size() - at_; }
+
+    bool read(void* out, uint64_t size) {
+        if (size > remaining()) return false;
+        if (size > 0) std::memcpy(out, bytes_.data() + at_, size);
+        at_ += size;
+        return true;
+    }
+
+    // `count` records of the container's element type into `out`.
+    template <typename Container>
+    bool read_records(Container& out, uint32_t count) {
+        const uint64_t size = static_cast<uint64_t>(count) * sizeof(typename Container::value_type);
+        if (size > remaining()) return false;
+        out.resize(count);
+        return read(out.data(), size);
+    }
+
+private:
+    std::vector<char> bytes_;
+    size_t at_ = 0;
+};
+
+// Whether a fixed-size name field holds its terminating NUL, so that it can
+// be read as a C string. The assembler writes at most 63 characters.
+template <size_t N>
+bool name_terminated(const char (&name)[N]) {
+    return std::memchr(name, '\0', N) != nullptr;
+}
+
 bool load_object_file(const std::string& path, LoadedObject& obj) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         std::cerr << "Error: Could not open file " << path << std::endl;
         return false;
     }
+    std::vector<char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (file.bad()) {
+        std::cerr << "Error: Could not read file " << path << std::endl;
+        return false;
+    }
+    ObjectReader in(std::move(bytes));
 
     obj.filename = path;
+    obj.header = {};
+    auto truncated = [&](const char* what) {
+        std::cerr << "Error: Truncated " << what << " in " << path << std::endl;
+        return false;
+    };
 
-    // Read Header
-    file.read(reinterpret_cast<char*>(&obj.header), sizeof(FileHeader));
+    if (!in.read(&obj.header, sizeof(FileHeader))) return truncated("header");
     if (obj.header.magic != LINKER_MAGIC) {
         std::cerr << "Error: Invalid magic number in " << path << std::endl;
         return false;
     }
 
-    // Read Text Section
-    obj.text_section.resize(obj.header.text_size);
-    if (obj.header.text_size > 0) {
-        file.read(reinterpret_cast<char*>(obj.text_section.data()), obj.header.text_size);
+    if (!in.read_records(obj.text_section, obj.header.text_size)) return truncated("text section");
+    if (!in.read_records(obj.data_section, obj.header.data_size)) return truncated("data section");
+    if (!in.read_records(obj.collect_blob, obj.header.collect_size)) {
+        return truncated("collected-section blob");
+    }
+    if (!in.read_records(obj.symbols, obj.header.symtable_count)) return truncated("symbol table");
+    if (!in.read_records(obj.relocs, obj.header.reloc_count)) return truncated("relocation table");
+    if (!in.read_records(obj.collects, obj.header.collect_count)) {
+        return truncated("collected-section table");
     }
 
-    // Read Data Section
-    obj.data_section.resize(obj.header.data_size);
-    if (obj.header.data_size > 0) {
-        file.read(reinterpret_cast<char*>(obj.data_section.data()), obj.header.data_size);
+    // Every name is read as a C string from here on.
+    auto unterminated = [&](const char* what) {
+        std::cerr << "Error: Unterminated " << what << " in " << path << std::endl;
+        return false;
+    };
+    for (const auto& sym : obj.symbols) {
+        if (!name_terminated(sym.name)) return unterminated("symbol name");
+    }
+    for (const auto& reloc : obj.relocs) {
+        if (!name_terminated(reloc.symbol_name)) return unterminated("relocation symbol name");
+    }
+    for (const auto& ce : obj.collects) {
+        if (!name_terminated(ce.name)) return unterminated("collected-section name");
     }
 
-    // Read the collected-section blob
-    obj.collect_blob.resize(obj.header.collect_size);
-    if (obj.header.collect_size > 0) {
-        file.read(reinterpret_cast<char*>(obj.collect_blob.data()), obj.header.collect_size);
-    }
-
-    // Read Symbols
-    obj.symbols.resize(obj.header.symtable_count);
-    if (obj.header.symtable_count > 0) {
-        file.read(reinterpret_cast<char*>(obj.symbols.data()),
-                  obj.header.symtable_count * sizeof(SymbolEntry));
-    }
-
-    // Read Relocations
-    obj.relocs.resize(obj.header.reloc_count);
-    if (obj.header.reloc_count > 0) {
-        file.read(reinterpret_cast<char*>(obj.relocs.data()),
-                  obj.header.reloc_count * sizeof(RelocEntry));
-    }
-
-    // Read collected-section chunks
-    obj.collects.resize(obj.header.collect_count);
-    if (obj.header.collect_count > 0) {
-        file.read(reinterpret_cast<char*>(obj.collects.data()),
-                  obj.header.collect_count * sizeof(CollectEntry));
-    }
-
-    // Read the debug trailer, which an object may not have
+    // The debug trailer, which an object may not have
     DebugHeader debug = {};
-    if (file.read(reinterpret_cast<char*>(&debug), sizeof(debug)) && debug.magic == DEBUG_MAGIC) {
-        obj.debug_strings.resize(debug.string_size);
-        file.read(obj.debug_strings.data(), debug.string_size);
-        obj.debug_funcs.resize(debug.func_count);
-        file.read(reinterpret_cast<char*>(obj.debug_funcs.data()),
-                  debug.func_count * sizeof(DebugFunc));
-        obj.debug_rows.resize(debug.row_count);
-        file.read(reinterpret_cast<char*>(obj.debug_rows.data()),
-                  debug.row_count * sizeof(DebugRow));
-        if (!file) {
-            std::cerr << "Error: Truncated debug trailer in " << path << std::endl;
-            return false;
+    if (in.read(&debug, sizeof(debug)) && debug.magic == DEBUG_MAGIC) {
+        if (!in.read_records(obj.debug_strings, debug.string_size) ||
+            !in.read_records(obj.debug_funcs, debug.func_count) ||
+            !in.read_records(obj.debug_rows, debug.row_count)) {
+            return truncated("debug trailer");
         }
     }
 
