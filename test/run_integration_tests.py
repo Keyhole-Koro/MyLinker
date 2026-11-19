@@ -11,8 +11,8 @@ LINKER_EXE = REPO_ROOT / "mllinker"
 OBJ_GEN = REPO_ROOT / "tools" / "obj_gen.py"
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
-from objformat import (COLLECT_ENTRY, DEBUG_HEADER, DEBUG_MAGIC, FILE_HEADER,
-                       LINKER_MAGIC, RELOC_ENTRY, SYMBOL_ENTRY)
+from objformat import (COLLECT_ENTRY, DEBUG_FUNC, DEBUG_HEADER, DEBUG_MAGIC, DEBUG_ROW,
+                       FILE_HEADER, LINKER_MAGIC, RELOC_ENTRY, SYMBOL_ENTRY)
 
 
 def raw_object(text=b"", data=b"", blob=b"", symbols=(), relocs=(), collects=(),
@@ -123,6 +123,32 @@ REJECTED = [
     # string it ran on into the next field.
     ("test_unterminated_name", ["test_unterminated_name.json"],
      "Error: Unterminated symbol name in", []),
+    # Table entries pointing outside what the object holds. A chunk outside
+    # the blob was copied from past its end into the image; a chunk whose
+    # offset + size wraps is the same.
+    ("test_collect_outside_blob", ["test_collect_outside_blob.json"],
+     "Error: Collected-section chunk 'rows' lies outside the blob in", []),
+    ("test_collect_chunk_wraps",
+     [("collect_chunk_wraps.obj", raw_object(text=HALT, blob=bytes([1, 2, 3, 4]), symbols=[START],
+                                             collects=[(b"rows", 2, 0xFFFFFFFF)]))],
+     "Error: Collected-section chunk 'rows' lies outside the blob in", []),
+    # Section 7 is none of ObjSection: the symbol used to get address 0,
+    # and a relocation in section 9 was patched as if in the text.
+    ("test_symbol_unknown_section",
+     [("symbol_unknown_section.obj", raw_object(text=HALT, symbols=[(b"__START__", 1, 7, 0)]))],
+     "Error: Unknown section 7 for symbol '__START__' in", []),
+    ("test_reloc_unknown_section",
+     [("reloc_unknown_section.obj", raw_object(text=HALT + bytes(4), symbols=[START],
+                                               relocs=[(4, b"__START__", 0, 9)]))],
+     "Error: Unknown section 9 for a relocation of '__START__' in", []),
+    # A debug func's name and a row's cost far outside the 4-byte string
+    # pool: writing the line table read them from wherever they pointed.
+    ("test_debug_string_outside_pool",
+     [("debug_string_outside_pool.obj",
+       raw_object(text=HALT, symbols=[START],
+                  trailer=DEBUG_HEADER.pack(DEBUG_MAGIC, 4, 1, 1) + b"ab\0\0"
+                  + DEBUG_FUNC.pack(0, 0x100000, 0) + DEBUG_ROW.pack(0, 0, 1, 0x100000)))],
+     "Error: Debug string offset out of bounds in", ["--lines", "/dev/null"]),
 ]
 
 # `helper` is a function nothing references, so it is not in the relocation

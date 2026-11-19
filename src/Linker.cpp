@@ -115,6 +115,58 @@ bool name_terminated(const char (&name)[N]) {
     return std::memchr(name, '\0', N) != nullptr;
 }
 
+// Whether `section` is one of ObjectFormat.h's ObjSection.
+bool known_section(uint32_t section) {
+    return section == SECTION_TEXT || section == SECTION_DATA || section == SECTION_COLLECT;
+}
+
+// Check what the tables of a loaded object point at: every chunk inside the
+// blob, every defined symbol and relocation in a known section, and every
+// debug string offset inside the pool. The linker indexes with these values
+// later on.
+bool check_object_tables(const LoadedObject& obj) {
+    const std::string& path = obj.filename;
+    const uint64_t blob_size = obj.collect_blob.size();
+    for (const auto& ce : obj.collects) {
+        if (static_cast<uint64_t>(ce.offset) + ce.size > blob_size) {
+            std::cerr << "Error: Collected-section chunk '" << ce.name
+                      << "' lies outside the blob in " << path << std::endl;
+            return false;
+        }
+    }
+    for (const auto& sym : obj.symbols) {
+        if ((sym.type == SYMBOL_DEFINED || sym.type == SYMBOL_SHARED) && !known_section(sym.section)) {
+            std::cerr << "Error: Unknown section " << sym.section << " for symbol '" << sym.name
+                      << "' in " << path << std::endl;
+            return false;
+        }
+    }
+    for (const auto& reloc : obj.relocs) {
+        if (!known_section(reloc.section)) {
+            std::cerr << "Error: Unknown section " << reloc.section << " for a relocation of '"
+                      << reloc.symbol_name << "' in " << path << std::endl;
+            return false;
+        }
+    }
+    // The pool is read as C strings from these offsets; std::string ends it
+    // with a NUL, so any offset inside it is safe.
+    const uint64_t string_size = obj.debug_strings.size();
+    auto in_pool = [&](uint32_t offset) { return offset < string_size; };
+    for (const auto& func : obj.debug_funcs) {
+        if (!in_pool(func.name) || !in_pool(func.file)) {
+            std::cerr << "Error: Debug string offset out of bounds in " << path << std::endl;
+            return false;
+        }
+    }
+    for (const auto& row : obj.debug_rows) {
+        if (!in_pool(row.file) || !in_pool(row.cost)) {
+            std::cerr << "Error: Debug string offset out of bounds in " << path << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool load_object_file(const std::string& path, LoadedObject& obj) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -177,7 +229,7 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
         }
     }
 
-    return true;
+    return check_object_tables(obj);
 }
 
 // Drop from `objects` every object the link does not need, and return the
