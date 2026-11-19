@@ -95,7 +95,7 @@ CLI_REJECTED = [
 # exit status 1, not a link and not a crash. (name, inputs, message, flags);
 # the error is the message, then the path of the last object, the malformed
 # one. An input is a JSON fixture or, for an object obj_gen.py cannot write,
-# a (file name, raw_object bytes) pair.
+# a (file name, raw_object bytes) pair; bytes of None make a directory.
 REJECTED = [
     # A relocation at offset 0xFFFFFFFC, in 8 bytes of text: offset + 4 wraps
     # around to 0, which a check of that sum lets through to patch far
@@ -162,6 +162,10 @@ REJECTED = [
                   trailer=DEBUG_HEADER.pack(DEBUG_MAGIC, 4, 1, 1) + b"ab\0\0"
                   + DEBUG_FUNC.pack(0, 0x100000, 0) + DEBUG_ROW.pack(0, 0, 1, 0x100000)))],
      "Error: Debug string offset out of bounds in", ["--lines", "/dev/null"]),
+    # A directory opens but fails every read. Reading a whole object at once
+    # with istreambuf_iterator let that read error escape as an exception and
+    # abort the linker.
+    ("test_directory_as_object", [("directory.obj", None)], "Error: Could not read file", []),
 ]
 
 # Writing to a full disk: every write to /dev/full fails with ENOSPC. The
@@ -204,7 +208,8 @@ def run(command):
 
 def build_objects(inputs, temp_root):
     """Write each input's object into temp_root and return their paths: a
-    JSON fixture through obj_gen.py, a (file name, bytes) pair as is."""
+    JSON fixture through obj_gen.py, a (file name, bytes) pair as is, and
+    a (file name, None) pair as an empty directory."""
     obj_files = []
     for item in inputs:
         if isinstance(item, str):
@@ -213,7 +218,10 @@ def build_objects(inputs, temp_root):
         else:
             file_name, content = item
             output_obj = temp_root / file_name
-            output_obj.write_bytes(content)
+            if content is None:
+                output_obj.mkdir()
+            else:
+                output_obj.write_bytes(content)
         obj_files.append(str(output_obj))
     return obj_files
 

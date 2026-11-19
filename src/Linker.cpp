@@ -5,7 +5,6 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <iterator>
 #include <map>
 #include <set>
 #include <utility>
@@ -78,34 +77,43 @@ bool is_private_label(const char* name) {
     return std::strstr(name, PRIVATE_LABEL_MARK) != nullptr;
 }
 
-// An object file's bytes, read front to back. Nothing is read past the end:
-// a size or count from a malformed header is checked against what is left
-// before anything is allocated for it.
+// An object file, read front to back from its stream. A size or count from
+// a malformed header is never allocated up front: a table grows a chunk at a
+// time as its bytes arrive, so a short or endless file costs no more memory
+// than the bytes the header claims and the file really holds. A failed read
+// sets badbit instead of throwing, which io_error() reports.
 class ObjectReader {
 public:
-    explicit ObjectReader(std::vector<char> bytes) : bytes_(std::move(bytes)) {}
+    explicit ObjectReader(std::istream& in) : in_(in) {}
 
-    uint64_t remaining() const { return bytes_.size() - at_; }
+    // Whether the last failed read was an I/O error rather than the end of
+    // the file.
+    bool io_error() const { return in_.bad(); }
 
     bool read(void* out, uint64_t size) {
-        if (size > remaining()) return false;
-        if (size > 0) std::memcpy(out, bytes_.data() + at_, size);
-        at_ += size;
-        return true;
+        if (size == 0) return true;
+        in_.read(static_cast<char*>(out), static_cast<std::streamsize>(size));
+        return static_cast<uint64_t>(in_.gcount()) == size;
     }
 
     // `count` records of the container's element type into `out`.
     template <typename Container>
     bool read_records(Container& out, uint32_t count) {
-        const uint64_t size = static_cast<uint64_t>(count) * sizeof(typename Container::value_type);
-        if (size > remaining()) return false;
-        out.resize(count);
-        return read(out.data(), size);
+        using Record = typename Container::value_type;
+        const size_t per_chunk = std::max<size_t>(1, CHUNK_BYTES / sizeof(Record));
+        out.clear();
+        while (out.size() < count) {
+            const size_t done = out.size();
+            const size_t n = std::min<size_t>(per_chunk, count - done);
+            out.resize(done + n);
+            if (!read(out.data() + done, static_cast<uint64_t>(n) * sizeof(Record))) return false;
+        }
+        return true;
     }
 
 private:
-    std::vector<char> bytes_;
-    size_t at_ = 0;
+    static constexpr size_t CHUNK_BYTES = 64 * 1024;
+    std::istream& in_;
 };
 
 // Whether a fixed-size name field holds its terminating NUL, so that it can
@@ -173,17 +181,18 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
         std::cerr << "Error: Could not open file " << path << std::endl;
         return false;
     }
-    std::vector<char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    if (file.bad()) {
-        std::cerr << "Error: Could not read file " << path << std::endl;
-        return false;
-    }
-    ObjectReader in(std::move(bytes));
+    ObjectReader in(file);
 
     obj.filename = path;
     obj.header = {};
+    // A failed read is the file ending early, or an I/O error such as
+    // reading a directory.
     auto truncated = [&](const char* what) {
-        std::cerr << "Error: Truncated " << what << " in " << path << std::endl;
+        if (in.io_error()) {
+            std::cerr << "Error: Could not read file " << path << std::endl;
+        } else {
+            std::cerr << "Error: Truncated " << what << " in " << path << std::endl;
+        }
         return false;
     };
 
@@ -221,7 +230,11 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
 
     // The debug trailer, which an object may not have
     DebugHeader debug = {};
-    if (in.read(&debug, sizeof(debug)) && debug.magic == DEBUG_MAGIC) {
+    if (!in.read(&debug, sizeof(debug))) {
+        // No trailer, or fewer bytes than its header, which are ignored; an
+        // I/O error is still one.
+        if (in.io_error()) return truncated("debug trailer");
+    } else if (debug.magic == DEBUG_MAGIC) {
         if (!in.read_records(obj.debug_strings, debug.string_size) ||
             !in.read_records(obj.debug_funcs, debug.func_count) ||
             !in.read_records(obj.debug_rows, debug.row_count)) {
