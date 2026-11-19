@@ -164,6 +164,18 @@ REJECTED = [
      "Error: Debug string offset out of bounds in", ["--lines", "/dev/null"]),
 ]
 
+# Writing to a full disk: every write to /dev/full fails with ENOSPC. The
+# linker used to report success over a truncated image, map or line table.
+# (name, flags, whether the image goes to the full device, message).
+FULL_DEVICE = "/dev/full"
+WRITE_FAILURES = [
+    ("test_image_write_fails", [], True, f"Error: Could not write output file {FULL_DEVICE}"),
+    ("test_map_write_fails", ["--map", FULL_DEVICE], False,
+     f"Error: Could not write map file {FULL_DEVICE}"),
+    ("test_lines_write_fails", ["--lines", FULL_DEVICE], False,
+     f"Error: Could not write line table {FULL_DEVICE}"),
+]
+
 # `helper` is a function nothing references, so it is not in the relocation
 # table; the map must still name it. `b_loop-[a:1]` is a block label and stays
 # out, or it would split `helper` in two for a reader of the map.
@@ -271,6 +283,22 @@ if __name__ == "__main__":
                 failed += 1
             else:
                 status_line("PASS", f"{name} refused with its error", "32")
+                passed += 1
+
+        for name, flags, image_to_full, message in WRITE_FAILURES:
+            if not Path(FULL_DEVICE).exists():
+                status_line("SKIP", f"{name}: no {FULL_DEVICE} here", "33")
+                continue
+            obj_files = build_objects(["test_split_address.json"], temp_root)
+            output = FULL_DEVICE if image_to_full else str(temp_root / f"{name}.bin")
+            result = subprocess.run([str(LINKER_EXE)] + flags + [output] + obj_files,
+                                    capture_output=True, text=True)
+            if result.returncode != 1 or message not in result.stderr:
+                status_line("FAIL", f"{name} expected exit 1 and '{message}', got exit "
+                            f"{result.returncode}: {result.stderr.strip()}", "31")
+                failed += 1
+            else:
+                status_line("PASS", f"{name} reported the failed write", "32")
                 passed += 1
 
         name, json_inputs, wanted, unwanted = MAP_TEST

@@ -675,6 +675,12 @@ bool write_output(const std::string& output_path,
     if (!layout.directory.empty()) {
         outfile.write(reinterpret_cast<const char*>(layout.directory.data()), layout.directory.size());
     }
+    // A full disk shows only here, when the buffered bytes are written out.
+    outfile.close();
+    if (!outfile) {
+        std::cerr << "Error: Could not write output file " << output_path << std::endl;
+        return false;
+    }
 
     std::cout << "Successfully created " << output_path << std::endl;
     if (emit_header) {
@@ -743,6 +749,11 @@ bool write_map(const std::string& map_path,
         std::snprintf(addr_buf, sizeof(addr_buf), "0x%08X", entry.first);
         mapfile << addr_buf << ' ' << entry.second << '\n';
     }
+    mapfile.close();
+    if (!mapfile) {
+        std::cerr << "Error: Could not write map file " << map_path << std::endl;
+        return false;
+    }
 
     std::cout << "Wrote symbol map " << map_path << " (" << ordered.size()
               << " symbols)" << std::endl;
@@ -803,6 +814,11 @@ bool write_lines(const std::string& lines_path, const std::vector<LoadedObject>&
         std::snprintf(addr, sizeof(addr), "0x%08X", row.addr);
         out << "line " << addr << ' ' << row.file << ' ' << row.line << ' '
             << (row.cost.empty() ? "-" : row.cost) << '\n';
+    }
+    out.close();
+    if (!out) {
+        std::cerr << "Error: Could not write line table " << lines_path << std::endl;
+        return false;
     }
     return true;
 }
