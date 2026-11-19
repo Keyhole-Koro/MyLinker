@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -8,6 +9,29 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_DIR = REPO_ROOT / "test"
 LINKER_EXE = REPO_ROOT / "mllinker"
 OBJ_GEN = REPO_ROOT / "tools" / "obj_gen.py"
+
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+from objformat import (COLLECT_ENTRY, FILE_HEADER, LINKER_MAGIC,
+                       RELOC_ENTRY, SYMBOL_ENTRY)
+
+
+def raw_object(text=b"", data=b"", blob=b"", symbols=(), relocs=(), collects=(),
+               header=None, trailer=b""):
+    """The bytes of an object, for a malformed one obj_gen.py cannot write.
+    `symbols`, `relocs` and `collects` are the fields of their records, in
+    objformat's order; `header` replaces the counted FileHeader fields and
+    `trailer` follows the tables (a debug trailer, say). Slice the result to
+    cut the object short."""
+    if header is None:
+        header = (LINKER_MAGIC, len(text), len(data), len(symbols), len(relocs),
+                  len(collects), len(blob))
+    out = FILE_HEADER.pack(*header) + text + data + blob
+    out += b"".join(SYMBOL_ENTRY.pack(*sym) for sym in symbols)
+    out += b"".join(RELOC_ENTRY.pack(*reloc) for reloc in relocs)
+    out += b"".join(COLLECT_ENTRY.pack(*ce) for ce in collects)
+    return out + trailer
+
+
 # (name, json inputs, should_link, optional linker flags, optional expected word)
 TESTS = [
     ("test_basic", ["test_A.json", "test_B.json"], True, [], None),
@@ -49,20 +73,21 @@ TESTS = [
 ]
 
 # Malformed objects the linker must refuse with an error naming the object:
-# exit status 1, not a link and not a crash. (name, json inputs, message);
+# exit status 1, not a link and not a crash. (name, inputs, message, flags);
 # the error is the message, then the path of the last object, the malformed
-# one.
+# one. An input is a JSON fixture or, for an object obj_gen.py cannot write,
+# a (file name, raw_object bytes) pair.
 REJECTED = [
     # A relocation at offset 0xFFFFFFFC, in 8 bytes of text: offset + 4 wraps
     # around to 0, which a check of that sum lets through to patch far
     # outside the text.
     ("test_reloc_offset_wraps", ["test_reloc_offset_wraps.json"],
-     "Error: Relocation offset out of bounds in"),
+     "Error: Relocation offset out of bounds in", []),
     # Relocation type 9 is none of ObjRelocType. An unknown type used to be
     # patched as an ABSOLUTE to address 0: `movi r1, target` linked as
     # `movi r1, 0`.
     ("test_unknown_reloc_type", ["test_unknown_reloc_type.json"],
-     "Error: Unknown relocation type 9 for 'target' in"),
+     "Error: Unknown relocation type 9 for 'target' in", []),
 ]
 
 # `helper` is a function nothing references, so it is not in the relocation
@@ -91,6 +116,22 @@ def run(command):
     return subprocess.run(command, check=True, capture_output=True, text=True)
 
 
+def build_objects(inputs, temp_root):
+    """Write each input's object into temp_root and return their paths: a
+    JSON fixture through obj_gen.py, a (file name, bytes) pair as is."""
+    obj_files = []
+    for item in inputs:
+        if isinstance(item, str):
+            output_obj = temp_root / item.replace(".json", ".obj")
+            run(["python3", str(OBJ_GEN), str(TEST_DIR / item), str(output_obj)])
+        else:
+            file_name, content = item
+            output_obj = temp_root / file_name
+            output_obj.write_bytes(content)
+        obj_files.append(str(output_obj))
+    return obj_files
+
+
 def build_linker():
     result = subprocess.run(["make", "-C", str(REPO_ROOT), "all"], check=False, capture_output=True, text=True)
     if result.returncode != 0:
@@ -104,12 +145,7 @@ if __name__ == "__main__":
     temp_root = Path(tempfile.mkdtemp(prefix="mylinker-integration-tests-"))
     try:
         for name, json_inputs, should_link, flags, expected_word in TESTS:
-            obj_files = []
-            for json_file in json_inputs:
-                input_path = TEST_DIR / json_file
-                output_obj = temp_root / json_file.replace(".json", ".obj")
-                run(["python3", str(OBJ_GEN), str(input_path), str(output_obj)])
-                obj_files.append(str(output_obj))
+            obj_files = build_objects(json_inputs, temp_root)
             output_bin = temp_root / f"{name}.bin"
             result = subprocess.run(
                 [str(LINKER_EXE)] + flags + [str(output_bin)] + obj_files,
@@ -138,14 +174,10 @@ if __name__ == "__main__":
             status_line("PASS", f"{name} linked successfully", "32")
             passed += 1
 
-        for name, json_inputs, message in REJECTED:
-            obj_files = []
-            for json_file in json_inputs:
-                output_obj = temp_root / json_file.replace(".json", ".obj")
-                run(["python3", str(OBJ_GEN), str(TEST_DIR / json_file), str(output_obj)])
-                obj_files.append(str(output_obj))
-            result = subprocess.run([str(LINKER_EXE), str(temp_root / f"{name}.bin")] + obj_files,
-                                    capture_output=True, text=True)
+        for name, inputs, message, flags in REJECTED:
+            obj_files = build_objects(inputs, temp_root)
+            result = subprocess.run([str(LINKER_EXE)] + flags + [str(temp_root / f"{name}.bin")]
+                                    + obj_files, capture_output=True, text=True)
             expected = f"{message} {obj_files[-1]}"
             if result.returncode != 1 or expected not in result.stderr:
                 status_line("FAIL", f"{name} expected exit 1 and '{expected}', got exit "
@@ -156,11 +188,7 @@ if __name__ == "__main__":
                 passed += 1
 
         name, json_inputs, wanted, unwanted = MAP_TEST
-        obj_files = []
-        for json_file in json_inputs:
-            output_obj = temp_root / json_file.replace(".json", ".obj")
-            run(["python3", str(OBJ_GEN), str(TEST_DIR / json_file), str(output_obj)])
-            obj_files.append(str(output_obj))
+        obj_files = build_objects(json_inputs, temp_root)
         map_path = temp_root / f"{name}.map"
         run([str(LINKER_EXE), "--map", str(map_path), str(temp_root / f"{name}.bin")] + obj_files)
         lines = map_path.read_text().splitlines()
@@ -174,11 +202,7 @@ if __name__ == "__main__":
             passed += 1
 
         name, json_inputs, flags = IMAGE_TEST
-        obj_files = []
-        for json_file in json_inputs:
-            output_obj = temp_root / json_file.replace(".json", ".obj")
-            run(["python3", str(OBJ_GEN), str(TEST_DIR / json_file), str(output_obj)])
-            obj_files.append(str(output_obj))
+        obj_files = build_objects(json_inputs, temp_root)
         output_bin = temp_root / f"{name}.bin"
         map_path = temp_root / f"{name}.map"
         run([str(LINKER_EXE)] + flags + ["--map", str(map_path), str(output_bin)] + obj_files)
