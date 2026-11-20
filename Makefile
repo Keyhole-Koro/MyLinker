@@ -1,13 +1,14 @@
 CC = g++
 CFLAGS = -Wall -Wextra -std=c++17 -Iinc
 SRC = src/main.cpp src/Linker.cpp
+HDR = inc/Linker.h inc/ObjectFormat.h
 TARGET = mllinker
 
-.PHONY: all test test-component test-integration test-all clean
+.PHONY: all test test-component test-integration test-e2e test-all clean
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
+$(TARGET): $(SRC) $(HDR)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
 
 # The current linker suite is self-contained: it generates objects and verifies linking.

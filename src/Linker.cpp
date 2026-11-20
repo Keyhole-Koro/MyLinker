@@ -77,79 +77,172 @@ bool is_private_label(const char* name) {
     return std::strstr(name, PRIVATE_LABEL_MARK) != nullptr;
 }
 
+// An object file, read front to back from its stream. A size or count from
+// a malformed header is never allocated up front: a table grows a chunk at a
+// time as its bytes arrive, so a short or endless file costs no more memory
+// than the bytes the header claims and the file really holds. A failed read
+// sets badbit instead of throwing, which io_error() reports.
+class ObjectReader {
+public:
+    explicit ObjectReader(std::istream& in) : in_(in) {}
+
+    // Whether the last failed read was an I/O error rather than the end of
+    // the file.
+    bool io_error() const { return in_.bad(); }
+
+    bool read(void* out, uint64_t size) {
+        if (size == 0) return true;
+        in_.read(static_cast<char*>(out), static_cast<std::streamsize>(size));
+        return static_cast<uint64_t>(in_.gcount()) == size;
+    }
+
+    // `count` records of the container's element type into `out`.
+    template <typename Container>
+    bool read_records(Container& out, uint32_t count) {
+        using Record = typename Container::value_type;
+        const size_t per_chunk = std::max<size_t>(1, CHUNK_BYTES / sizeof(Record));
+        out.clear();
+        while (out.size() < count) {
+            const size_t done = out.size();
+            const size_t n = std::min<size_t>(per_chunk, count - done);
+            out.resize(done + n);
+            if (!read(out.data() + done, static_cast<uint64_t>(n) * sizeof(Record))) return false;
+        }
+        return true;
+    }
+
+private:
+    static constexpr size_t CHUNK_BYTES = 64 * 1024;
+    std::istream& in_;
+};
+
+// Whether a fixed-size name field holds its terminating NUL, so that it can
+// be read as a C string. The assembler writes at most 63 characters.
+template <size_t N>
+bool name_terminated(const char (&name)[N]) {
+    return std::memchr(name, '\0', N) != nullptr;
+}
+
+// Whether `section` is one of ObjectFormat.h's ObjSection.
+bool known_section(uint32_t section) {
+    return section == SECTION_TEXT || section == SECTION_DATA || section == SECTION_COLLECT;
+}
+
+// Check what the tables of a loaded object point at: every chunk inside the
+// blob, every defined symbol and relocation in a known section, and every
+// debug string offset inside the pool. The linker indexes with these values
+// later on.
+bool check_object_tables(const LoadedObject& obj) {
+    const std::string& path = obj.filename;
+    const uint64_t blob_size = obj.collect_blob.size();
+    for (const auto& ce : obj.collects) {
+        if (static_cast<uint64_t>(ce.offset) + ce.size > blob_size) {
+            std::cerr << "Error: Collected-section chunk '" << ce.name
+                      << "' lies outside the blob in " << path << std::endl;
+            return false;
+        }
+    }
+    for (const auto& sym : obj.symbols) {
+        if ((sym.type == SYMBOL_DEFINED || sym.type == SYMBOL_SHARED) && !known_section(sym.section)) {
+            std::cerr << "Error: Unknown section " << sym.section << " for symbol '" << sym.name
+                      << "' in " << path << std::endl;
+            return false;
+        }
+    }
+    for (const auto& reloc : obj.relocs) {
+        if (!known_section(reloc.section)) {
+            std::cerr << "Error: Unknown section " << reloc.section << " for a relocation of '"
+                      << reloc.symbol_name << "' in " << path << std::endl;
+            return false;
+        }
+    }
+    // The pool is read as C strings from these offsets; std::string ends it
+    // with a NUL, so any offset inside it is safe.
+    const uint64_t string_size = obj.debug_strings.size();
+    auto in_pool = [&](uint32_t offset) { return offset < string_size; };
+    for (const auto& func : obj.debug_funcs) {
+        if (!in_pool(func.name) || !in_pool(func.file)) {
+            std::cerr << "Error: Debug string offset out of bounds in " << path << std::endl;
+            return false;
+        }
+    }
+    for (const auto& row : obj.debug_rows) {
+        if (!in_pool(row.file) || !in_pool(row.cost)) {
+            std::cerr << "Error: Debug string offset out of bounds in " << path << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool load_object_file(const std::string& path, LoadedObject& obj) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         std::cerr << "Error: Could not open file " << path << std::endl;
         return false;
     }
+    ObjectReader in(file);
 
     obj.filename = path;
+    obj.header = {};
+    // A failed read is the file ending early, or an I/O error such as
+    // reading a directory.
+    auto truncated = [&](const char* what) {
+        if (in.io_error()) {
+            std::cerr << "Error: Could not read file " << path << std::endl;
+        } else {
+            std::cerr << "Error: Truncated " << what << " in " << path << std::endl;
+        }
+        return false;
+    };
 
-    // Read Header
-    file.read(reinterpret_cast<char*>(&obj.header), sizeof(FileHeader));
+    if (!in.read(&obj.header, sizeof(FileHeader))) return truncated("header");
     if (obj.header.magic != LINKER_MAGIC) {
         std::cerr << "Error: Invalid magic number in " << path << std::endl;
         return false;
     }
 
-    // Read Text Section
-    obj.text_section.resize(obj.header.text_size);
-    if (obj.header.text_size > 0) {
-        file.read(reinterpret_cast<char*>(obj.text_section.data()), obj.header.text_size);
+    if (!in.read_records(obj.text_section, obj.header.text_size)) return truncated("text section");
+    if (!in.read_records(obj.data_section, obj.header.data_size)) return truncated("data section");
+    if (!in.read_records(obj.collect_blob, obj.header.collect_size)) {
+        return truncated("collected-section blob");
+    }
+    if (!in.read_records(obj.symbols, obj.header.symtable_count)) return truncated("symbol table");
+    if (!in.read_records(obj.relocs, obj.header.reloc_count)) return truncated("relocation table");
+    if (!in.read_records(obj.collects, obj.header.collect_count)) {
+        return truncated("collected-section table");
     }
 
-    // Read Data Section
-    obj.data_section.resize(obj.header.data_size);
-    if (obj.header.data_size > 0) {
-        file.read(reinterpret_cast<char*>(obj.data_section.data()), obj.header.data_size);
+    // Every name is read as a C string from here on.
+    auto unterminated = [&](const char* what) {
+        std::cerr << "Error: Unterminated " << what << " in " << path << std::endl;
+        return false;
+    };
+    for (const auto& sym : obj.symbols) {
+        if (!name_terminated(sym.name)) return unterminated("symbol name");
+    }
+    for (const auto& reloc : obj.relocs) {
+        if (!name_terminated(reloc.symbol_name)) return unterminated("relocation symbol name");
+    }
+    for (const auto& ce : obj.collects) {
+        if (!name_terminated(ce.name)) return unterminated("collected-section name");
     }
 
-    // Read the collected-section blob
-    obj.collect_blob.resize(obj.header.collect_size);
-    if (obj.header.collect_size > 0) {
-        file.read(reinterpret_cast<char*>(obj.collect_blob.data()), obj.header.collect_size);
-    }
-
-    // Read Symbols
-    obj.symbols.resize(obj.header.symtable_count);
-    if (obj.header.symtable_count > 0) {
-        file.read(reinterpret_cast<char*>(obj.symbols.data()),
-                  obj.header.symtable_count * sizeof(SymbolEntry));
-    }
-
-    // Read Relocations
-    obj.relocs.resize(obj.header.reloc_count);
-    if (obj.header.reloc_count > 0) {
-        file.read(reinterpret_cast<char*>(obj.relocs.data()),
-                  obj.header.reloc_count * sizeof(RelocEntry));
-    }
-
-    // Read collected-section chunks
-    obj.collects.resize(obj.header.collect_count);
-    if (obj.header.collect_count > 0) {
-        file.read(reinterpret_cast<char*>(obj.collects.data()),
-                  obj.header.collect_count * sizeof(CollectEntry));
-    }
-
-    // Read the debug trailer, which an object may not have
+    // The debug trailer, which an object may not have
     DebugHeader debug = {};
-    if (file.read(reinterpret_cast<char*>(&debug), sizeof(debug)) && debug.magic == DEBUG_MAGIC) {
-        obj.debug_strings.resize(debug.string_size);
-        file.read(obj.debug_strings.data(), debug.string_size);
-        obj.debug_funcs.resize(debug.func_count);
-        file.read(reinterpret_cast<char*>(obj.debug_funcs.data()),
-                  debug.func_count * sizeof(DebugFunc));
-        obj.debug_rows.resize(debug.row_count);
-        file.read(reinterpret_cast<char*>(obj.debug_rows.data()),
-                  debug.row_count * sizeof(DebugRow));
-        if (!file) {
-            std::cerr << "Error: Truncated debug trailer in " << path << std::endl;
-            return false;
+    if (!in.read(&debug, sizeof(debug))) {
+        // No trailer, or fewer bytes than its header, which are ignored; an
+        // I/O error is still one.
+        if (in.io_error()) return truncated("debug trailer");
+    } else if (debug.magic == DEBUG_MAGIC) {
+        if (!in.read_records(obj.debug_strings, debug.string_size) ||
+            !in.read_records(obj.debug_funcs, debug.func_count) ||
+            !in.read_records(obj.debug_rows, debug.row_count)) {
+            return truncated("debug trailer");
         }
     }
 
-    return true;
+    return check_object_tables(obj);
 }
 
 // Drop from `objects` every object the link does not need, and return the
@@ -595,6 +688,12 @@ bool write_output(const std::string& output_path,
     if (!layout.directory.empty()) {
         outfile.write(reinterpret_cast<const char*>(layout.directory.data()), layout.directory.size());
     }
+    // A full disk shows only here, when the buffered bytes are written out.
+    outfile.close();
+    if (!outfile) {
+        std::cerr << "Error: Could not write output file " << output_path << std::endl;
+        return false;
+    }
 
     std::cout << "Successfully created " << output_path << std::endl;
     if (emit_header) {
@@ -663,6 +762,11 @@ bool write_map(const std::string& map_path,
         std::snprintf(addr_buf, sizeof(addr_buf), "0x%08X", entry.first);
         mapfile << addr_buf << ' ' << entry.second << '\n';
     }
+    mapfile.close();
+    if (!mapfile) {
+        std::cerr << "Error: Could not write map file " << map_path << std::endl;
+        return false;
+    }
 
     std::cout << "Wrote symbol map " << map_path << " (" << ordered.size()
               << " symbols)" << std::endl;
@@ -723,6 +827,11 @@ bool write_lines(const std::string& lines_path, const std::vector<LoadedObject>&
         std::snprintf(addr, sizeof(addr), "0x%08X", row.addr);
         out << "line " << addr << ' ' << row.file << ' ' << row.line << ' '
             << (row.cost.empty() ? "-" : row.cost) << '\n';
+    }
+    out.close();
+    if (!out) {
+        std::cerr << "Error: Could not write line table " << lines_path << std::endl;
+        return false;
     }
     return true;
 }

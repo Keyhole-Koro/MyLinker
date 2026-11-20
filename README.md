@@ -4,19 +4,29 @@ This is a minimal implementation of the `MyCCLinker` consistent with the design 
 
 ## Structure
 *   `inc/ObjectFormat.h`: Defines the `.obj` file format (Header, Sections, Symbols, Relocs).
-*   `src/main.cpp`: The linker implementation (C++).
+*   `src/main.cpp`: The command line (`--map`, `--lines`, `--base`, `--header`, `--redirect`).
+*   `src/Linker.cpp`: The linker implementation (C++).
 *   `tools/obj_gen.py`: A helper script to generate `.obj` files from JSON (since Assembler support is pending).
 *   `tools/objformat.py`: The format's constants and record layouts for the Python tools, repeated from `inc/ObjectFormat.h`.
-*   `test/`: Sample JSON inputs for testing.
+*   `test/`: Sample JSON inputs and `run_integration_tests.py`, the test suite.
 
 ## How to Build
 ```bash
 make
 # or
-g++ -o mycclinker src/main.cpp -Iinc
+g++ -std=c++17 -Iinc -o mllinker src/main.cpp src/Linker.cpp
 ```
 
 ## How to Test
+```bash
+make test-component
+```
+builds `mllinker`, generates objects from the JSON inputs in `test/` and checks
+the links, the images and the maps, and that malformed objects and arguments are
+refused.
+
+To link by hand:
+
 1.  **Generate Object Files:**
     Use the python script to create binary object files from the JSON descriptions.
     ```bash
@@ -27,7 +37,7 @@ g++ -o mycclinker src/main.cpp -Iinc
 2.  **Run Linker:**
     Link the object files into a single executable.
     ```bash
-    ./mycclinker program.bin test/A.obj test/B.obj
+    ./mllinker program.bin test/A.obj test/B.obj
     ```
 
 3.  **Verify Output:**
