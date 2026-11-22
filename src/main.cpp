@@ -1,8 +1,35 @@
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <vector>
 
 #include "Linker.h"
+
+namespace {
+
+// `--base`: hexadecimal digits, after an optional 0x, of at most 32 bits.
+// Nothing else is accepted: std::stoul threw on "zz", stopped at "40zz" and
+// let "100000040" through truncated to 0x40.
+bool parse_base_address(const std::string& text, uint32_t& address) {
+    size_t at = 0;
+    if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) at = 2;
+    if (at == text.size()) return false;
+    uint64_t value = 0;
+    for (; at < text.size(); ++at) {
+        const char c = text[at];
+        int digit;
+        if (c >= '0' && c <= '9') digit = c - '0';
+        else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+        else return false;
+        value = value * 16 + static_cast<uint64_t>(digit);
+        if (value > 0xFFFFFFFFu) return false;
+    }
+    address = static_cast<uint32_t>(value);
+    return true;
+}
+
+}  // namespace
 
 int main(int argc, char* argv[]) {
     // Pull the optional "--map <file>" flag out of the argument list first so the
@@ -33,7 +60,12 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: --base requires an address" << std::endl;
                 return 1;
             }
-            base_addr = std::stoul(argv[++i], nullptr, 16);
+            std::string value = argv[++i];
+            if (!parse_base_address(value, base_addr)) {
+                std::cerr << "Error: --base expects a hexadecimal address of at most 32 bits, got '"
+                          << value << "'" << std::endl;
+                return 1;
+            }
         } else if (arg == "--header") {
             emit_header = true;
         } else if (arg == "--redirect") {
