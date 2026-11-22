@@ -1,0 +1,11 @@
+{
+    "text": [8, 32, 0, 0, 252, 0, 0, 0, 252, 0, 0, 0],
+    "data": [],
+    "symbols": [
+        { "name": "b_entry", "type": 1, "section": 0, "offset": 0 },
+        { "name": "helper-[same:1]", "type": 1, "section": 0, "offset": 8 }
+    ],
+    "relocs": [
+        { "offset": 0, "symbol_name": "helper-[same:1]", "type": 0 }
+    ]
+}

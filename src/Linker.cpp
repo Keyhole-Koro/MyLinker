@@ -247,8 +247,9 @@ bool load_object_file(const std::string& path, LoadedObject& obj) {
 
 // Drop from `objects` every object the link does not need, and return the
 // names it needs: __START__, the redirect entries, and every name a live
-// object's relocations refer to. An object is live when it defines a needed
-// name or contributes to a collected section.
+// object's relocations refer to, but for its private labels, which only it
+// defines. An object is live when it defines a needed name or contributes to
+// a collected section.
 std::set<std::string> keep_live_objects(std::vector<LoadedObject>& objects,
                                         const std::vector<LinkRedirect>& redirects) {
     std::set<std::string> needed_symbols;
@@ -287,6 +288,7 @@ std::set<std::string> keep_live_objects(std::vector<LoadedObject>& objects,
         for (size_t i = 0; i < objects.size(); ++i) {
             if (!object_active[i]) continue;
             for (const auto& reloc : objects[i].relocs) {
+                if (is_private_label(reloc.symbol_name)) continue;
                 if (needed_symbols.insert(reloc.symbol_name).second) changed = true;
             }
         }
@@ -419,15 +421,17 @@ bool define_symbols(const std::vector<LoadedObject>& objects,
                 continue;
             }
             if (sym.type != SYMBOL_DEFINED) continue;
+            // A private label belongs to its object alone and is resolved
+            // there (apply_relocations). The assembler tags it
+            // `name-[module:n]` with the file's stem, so two files with the
+            // same stem in different directories (TestKit's
+            // runtime/verdict.mln and platform/.../verdict.mln) can repeat
+            // a name; in one table, the second would be a duplicate.
+            if (is_private_label(sym.name)) continue;
             // Two objects defining the same name is an error whether or
             // not anyone references it: a reference would silently bind
-            // to whichever came first. Private labels are excluded: the
-            // assembler tags them `name-[module:n]` with the file's stem,
-            // so two files with the same stem in different directories
-            // (TestKit's runtime/verdict.mln and platform/.../verdict.mln)
-            // repeat tags, and such labels are never referenced across
-            // objects anyway.
-            if (!is_mergeable_instantiation(sym.name) && !is_private_label(sym.name)) {
+            // to whichever came first.
+            if (!is_mergeable_instantiation(sym.name)) {
                 auto seen = all_definitions.find(sym.name);
                 if (seen != all_definitions.end()) {
                     std::cerr << "Error: Duplicate symbol definition '" << sym.name
@@ -552,12 +556,25 @@ uint32_t patch_word(uint32_t type, uint32_t existing, uint32_t target, uint32_t 
     return existing; // not reached: apply_relocations rejects any other type
 }
 
+// The final address of every private label `obj` defines (ObjectFormat.h).
+std::map<std::string, uint32_t> private_addresses(const LoadedObject& obj) {
+    std::map<std::string, uint32_t> addresses;
+    for (const auto& sym : obj.symbols) {
+        if (sym.type == SYMBOL_DEFINED && is_private_label(sym.name)) {
+            addresses.emplace(sym.name, symbol_address(obj, sym));
+        }
+    }
+    return addresses;
+}
+
 // Patch every relocation of the live objects with its symbol's final
-// address (see patch_word).
+// address (see patch_word): a private label's from the object's own
+// definition, any other name's from the global table.
 bool apply_relocations(std::vector<LoadedObject>& objects,
                        const std::map<std::string, uint32_t>& global_symbol_table,
                        const std::vector<LinkRedirect>& redirects) {
     for (auto& obj : objects) {
+        const std::map<std::string, uint32_t> own = private_addresses(obj);
         for (const auto& reloc : obj.relocs) {
             std::string sym_name(reloc.symbol_name);
             if (!known_reloc_type(reloc.type)) {
@@ -575,10 +592,17 @@ bool apply_relocations(std::vector<LoadedObject>& objects,
                 }
             }
 
-            auto symbol = global_symbol_table.find(sym_name);
-            if (symbol == global_symbol_table.end()) {
-                std::cerr << "Error: Undefined symbol '" << sym_name << "' referenced in "
-                          << obj.filename << std::endl;
+            const bool is_private = is_private_label(sym_name.c_str());
+            const auto& table = is_private ? own : global_symbol_table;
+            auto symbol = table.find(sym_name);
+            if (symbol == table.end()) {
+                if (is_private) {
+                    std::cerr << "Error: Private label '" << sym_name << "' is not defined in "
+                              << obj.filename << ", which refers to it" << std::endl;
+                } else {
+                    std::cerr << "Error: Undefined symbol '" << sym_name << "' referenced in "
+                              << obj.filename << std::endl;
+                }
                 return false;
             }
             uint32_t target_addr = symbol->second;
@@ -705,34 +729,45 @@ bool write_output(const std::string& output_path,
     return true;
 }
 
-// The symbols a map lists. The relocation table holds only what something
-// referenced, but a reader needs a name for every function: one left out would
-// be charged to whichever symbol comes before it. Block labels stay out unless
-// they were referenced, because the assembler tags them `name-[module:n]` and
-// they would split a function into pieces.
-std::map<std::string, uint32_t> collect_map_symbols(
+// The symbols a map lists, as (address, name) in address order. The global
+// table holds only what something referenced, but a reader needs a name for
+// every function: one left out would be charged to whichever symbol comes
+// before it. Block labels stay out unless their object referred to them,
+// because the assembler tags them `name-[module:n]` and they would split a
+// function into pieces. Two objects may each list a private label of the same
+// name, at their own addresses.
+std::vector<std::pair<uint32_t, std::string>> collect_map_symbols(
         const std::vector<LoadedObject>& objects,
         const std::map<std::string, uint32_t>& global_symbol_table) {
-    std::map<std::string, uint32_t> symbols = global_symbol_table;
+    std::map<std::string, uint32_t> named = global_symbol_table;
+    std::set<std::pair<uint32_t, std::string>> private_labels;
     for (const auto& obj : objects) {
+        const std::map<std::string, uint32_t> own = private_addresses(obj);
+        for (const auto& reloc : obj.relocs) {
+            auto label = own.find(reloc.symbol_name);
+            if (label != own.end()) private_labels.emplace(label->second, label->first);
+        }
         for (const auto& sym : obj.symbols) {
             if (sym.type != SYMBOL_DEFINED && sym.type != SYMBOL_SHARED) continue;
             if (is_private_label(sym.name)) continue;
             if (sym.section == SECTION_TEXT || sym.section == SECTION_DATA) {
-                symbols.emplace(sym.name, symbol_address(obj, sym));
+                named.emplace(sym.name, symbol_address(obj, sym));
             }
         }
     }
-    return symbols;
+    std::vector<std::pair<uint32_t, std::string>> ordered(private_labels.begin(), private_labels.end());
+    for (const auto& entry : named) ordered.emplace_back(entry.second, entry.first);
+    std::sort(ordered.begin(), ordered.end());
+    return ordered;
 }
 
 // Emit a symbol map so downstream tools (e.g. the emulator profiler) can turn a
 // program counter into a function name. One line per symbol, sorted by address:
 //   0x00000040 kernel_main
 // A leading comment records the text/data split so a reader knows where code
-// ends. `symbols` comes from collect_map_symbols.
+// ends. `symbols` comes from collect_map_symbols, in address order.
 bool write_map(const std::string& map_path,
-               const std::map<std::string, uint32_t>& symbols,
+               const std::vector<std::pair<uint32_t, std::string>>& symbols,
                const Layout& layout) {
     std::ofstream mapfile(map_path);
     if (!mapfile) {
@@ -748,16 +783,9 @@ bool write_map(const std::string& map_path,
             << (layout.data_base + layout.data_size) << std::dec
             << " (" << layout.data_size << " bytes)\n";
 
-    // Sort by address so the map reads like a memory layout and so the profiler
+    // By address, so the map reads like a memory layout and so the profiler
     // can binary-search / range-scan it to attribute a PC to the nearest symbol.
-    std::vector<std::pair<uint32_t, std::string>> ordered;
-    ordered.reserve(symbols.size());
     for (const auto& entry : symbols) {
-        ordered.emplace_back(entry.second, entry.first);
-    }
-    std::sort(ordered.begin(), ordered.end());
-
-    for (const auto& entry : ordered) {
         char addr_buf[16];
         std::snprintf(addr_buf, sizeof(addr_buf), "0x%08X", entry.first);
         mapfile << addr_buf << ' ' << entry.second << '\n';
@@ -768,7 +796,7 @@ bool write_map(const std::string& map_path,
         return false;
     }
 
-    std::cout << "Wrote symbol map " << map_path << " (" << ordered.size()
+    std::cout << "Wrote symbol map " << map_path << " (" << symbols.size()
               << " symbols)" << std::endl;
     return true;
 }

@@ -56,8 +56,9 @@ struct FileHeader {
 // object: `<label>-[<module>:<n>]`, <module> being the stem of the source
 // file and <n> counting the file's private labels. Only its own object
 // refers to such a name. The linker knows one by PRIVATE_LABEL_MARK and
-// leaves it out of the duplicate-definition check -- two source files with
-// the same stem repeat names -- and out of the symbol map unless referenced.
+// resolves it inside its object, never through the global symbol table --
+// two source files with the same stem repeat names -- and leaves it out of
+// the symbol map unless referenced.
 #define PRIVATE_LABEL_MARK "-["
 #define PRIVATE_LABEL_FORMAT "%s" PRIVATE_LABEL_MARK "%s:%u]"
 

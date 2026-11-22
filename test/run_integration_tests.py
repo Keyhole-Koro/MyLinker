@@ -71,6 +71,14 @@ TESTS = [
     # The same, but A names `helper` itself: two modules share the name, so
     # nothing says which one is meant.
     ("test_shared_named", ["test_shared_named_A.json", "test_shared_B.json"], False, [], None),
+    # Two source files with the same stem in different directories: the
+    # assembler gives both private `helper`s the name `helper-[same:1]`. Each
+    # object's movi gets its own: A's at 8, B's at 12 + 8. In one global
+    # table the second was a duplicate definition and the link failed.
+    ("test_private_same_stem_A", ["test_private_same_stem_A.json", "test_private_same_stem_B.json"],
+     True, [], (4, 0x08200008)),
+    ("test_private_same_stem_B", ["test_private_same_stem_A.json", "test_private_same_stem_B.json"],
+     True, [], (12, 0x08200014)),
     # `movi r1, target` assembles to LUI and ADDIS. Linked at 0x40000000,
     # `target` is 0x40000008: LUI takes 0x40000008 >> 11 = 0x80000 and ADDIS
     # its low 11 bits, 8.
@@ -162,6 +170,11 @@ REJECTED = [
                   trailer=DEBUG_HEADER.pack(DEBUG_MAGIC, 4, 1, 1) + b"ab\0\0"
                   + DEBUG_FUNC.pack(0, 0x100000, 0) + DEBUG_ROW.pack(0, 0, 1, 0x100000)))],
      "Error: Debug string offset out of bounds in", ["--lines", "/dev/null"]),
+    # A private label is its object's own: another object that names it is
+    # malformed, and used to be bound to it through the global table.
+    ("test_private_label_elsewhere",
+     ["test_private_elsewhere_owner.json", "test_private_elsewhere_user.json"],
+     "Error: Private label 'helper-[owner:1]' is not defined in", []),
     # A directory opens but fails every read. Reading a whole object at once
     # with istreambuf_iterator let that read error escape as an exception and
     # abort the linker.
@@ -183,7 +196,13 @@ WRITE_FAILURES = [
 # `helper` is a function nothing references, so it is not in the relocation
 # table; the map must still name it. `b_loop-[a:1]` is a block label and stays
 # out, or it would split `helper` in two for a reader of the map.
-MAP_TEST = ("test_map", ["test_map_A.json"], ["0x00000000 __START__", "0x00000004 helper"], ["b_loop"])
+# (name, json inputs, lines the map has, text no line may hold)
+MAP_TESTS = [
+    ("test_map", ["test_map_A.json"], ["0x00000000 __START__", "0x00000004 helper"], ["b_loop"]),
+    # Each object's referenced private label, both under the one name.
+    ("test_map_same_stem", ["test_private_same_stem_A.json", "test_private_same_stem_B.json"],
+     ["0x00000008 helper-[same:1]", "0x00000014 helper-[same:1]"], []),
+]
 
 # A whole MBIN image and its map, byte for byte: text and page-aligned data
 # from two objects, their collected-section chunks laid out by name with the
@@ -309,19 +328,21 @@ if __name__ == "__main__":
                 status_line("PASS", f"{name} reported the failed write", "32")
                 passed += 1
 
-        name, json_inputs, wanted, unwanted = MAP_TEST
-        obj_files = build_objects(json_inputs, temp_root)
-        map_path = temp_root / f"{name}.map"
-        run([str(LINKER_EXE), "--map", str(map_path), str(temp_root / f"{name}.bin")] + obj_files)
-        lines = map_path.read_text().splitlines()
-        missing = [line for line in wanted if line not in lines]
-        leaked = [line for line in lines for label in unwanted if label in line]
-        if missing or leaked:
-            status_line("FAIL", f"{name} missing {missing}, unexpected {leaked}", "31")
-            failed += 1
-        else:
-            status_line("PASS", f"{name} names unreferenced functions only", "32")
-            passed += 1
+        for name, json_inputs, wanted, unwanted in MAP_TESTS:
+            obj_files = build_objects(json_inputs, temp_root)
+            map_path = temp_root / f"{name}.map"
+            result = subprocess.run([str(LINKER_EXE), "--map", str(map_path), str(temp_root / f"{name}.bin")]
+                                    + obj_files, capture_output=True, text=True)
+            lines = map_path.read_text().splitlines() if result.returncode == 0 else []
+            missing = [line for line in wanted if line not in lines]
+            leaked = [line for line in lines for label in unwanted if label in line]
+            if result.returncode != 0 or missing or leaked:
+                status_line("FAIL", f"{name} exit {result.returncode} {result.stderr.strip()}, "
+                            f"missing {missing}, unexpected {leaked}", "31")
+                failed += 1
+            else:
+                status_line("PASS", f"{name} lists what it should", "32")
+                passed += 1
 
         name, json_inputs, flags = IMAGE_TEST
         obj_files = build_objects(json_inputs, temp_root)

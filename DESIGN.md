@@ -53,6 +53,14 @@ duplicate-definition error. Another object may still name it, as a test harness
 names a test function, while exactly one object shares it and none defines it;
 otherwise naming it is an error.
 
+A private label is named `<label>-[<module>:<n>]`, after the stem of its
+source file (`ObjectFormat.h`). Two files with the same stem in different
+directories can therefore give two labels the same name, so the linker never
+puts a private label in the global symbol table: a relocation that names one
+takes the address its own object defines, and an object that names another
+object's private label is refused. The map lists each object's referenced
+private labels at their own addresses, a name twice if two objects use it.
+
 ### 3.4 Relocation Table Entry
 Describes where the code needs patching.
 
